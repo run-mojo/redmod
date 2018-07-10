@@ -1,0 +1,22 @@
+[package]
+name = "red_mod"
+version = "0.1.0"
+authors = ["Clay Molocznik <clay@mojo.run>"]
+build = "build.rs"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+libc = "0.2"
+#jemallocator = "0.1"
+time = "0.1"
+bitflags = "1.0"
+arrayvec = "0.4.7"
+#lazy_static = "1.0"
+#dlopen = "0.1.4"
+#dlopen_derive = "0.1.2"
+
+
+[build-dependencies]
+gcc = "0.3"
