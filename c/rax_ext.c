@@ -1,5 +1,5 @@
 //
-// Created by Clay Molocznik on 7/11/18.
+//
 //
 
 #include <stdlib.h>
