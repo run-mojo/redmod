@@ -47,15 +47,6 @@
  * requiring the function to have multiple return values. */
 void *raxNotFound = (void *) "rax-not-found-pointer";
 
-raxIterator *raxIteratorNew(rax *rt) {
-    raxIterator *it = rax_malloc(sizeof(raxIterator));
-    raxStart(it, rt);
-    return it;
-}
-
-void raxIteratorFree(raxIterator *it) {
-    rax_free(it);
-}
 
 /* -------------------------------- Debugging ------------------------------ */
 

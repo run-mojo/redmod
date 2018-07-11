@@ -1,5 +1,5 @@
 use libc;
-use rax::Rax;
+use rax::RawRax;
 use std;
 
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024 * 8;
@@ -55,7 +55,7 @@ pub struct Chunk {
     pub state: ChunkState,
 
     ///
-    pub list: Box<Rax<Job>>,
+    pub list: Box<RawRax<Job>>,
 }
 
 pub enum Task {
@@ -71,7 +71,7 @@ pub struct JobStream {
     /// Chunk
     tail: Box<Chunk>,
     /// Radix tree of all chunks.
-    chunks: Box<Rax<Chunk>>,
+    chunks: Box<RawRax<Chunk>>,
     /// Current configuration to control the behavior and memory consumption.
     config: Config,
     /// Dequeue of tasks.

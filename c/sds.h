@@ -35,6 +35,7 @@
 
 #define SDS_MAX_PREALLOC (1024*1024)
 const char *SDS_NOINIT;
+const int SDS_HDR5_SIZE;
 
 #include <sys/types.h>
 #include <stdarg.h>

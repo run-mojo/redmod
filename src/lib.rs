@@ -18,6 +18,7 @@ extern crate arrayvec;
 //extern crate lazy_static;
 extern crate libc;
 extern crate time;
+extern crate byteorder;
 
 #[macro_use]
 pub mod macros;
@@ -35,6 +36,7 @@ pub mod rax;
 #[cfg_attr(feature = "cargo-clippy",
 allow(redundant_field_names, suspicious_arithmetic_impl))]
 pub mod stream;
+#[macro_use]
 pub mod key;
 
 #[cfg_attr(feature = "cargo-clippy",
