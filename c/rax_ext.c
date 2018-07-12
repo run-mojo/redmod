@@ -17,6 +17,7 @@
 #include RAX_MALLOC_INCLUDE "rax_malloc.h"
 
 raxIterator *raxIteratorNew(rax *rt) {
+    // Allocate on the heap.
     raxIterator *it = rax_malloc(sizeof(raxIterator));
     raxStart(it, rt);
     return it;

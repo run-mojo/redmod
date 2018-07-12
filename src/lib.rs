@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 #![feature(lang_items)]
 
+#![feature(test)]
+extern crate test;
+
+extern crate stopwatch;
 //extern crate jemallocator;
 //#[global_allocator]
 //static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;

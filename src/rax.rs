@@ -14,7 +14,7 @@ pub trait RAX<K: RaxKey, V> {
 
     fn find(&self, key: K) -> Option<&V>;
 
-    fn insert(&mut self, mut key: K, data: Box<V>) -> Result<(libc::c_int, Option<Box<V>>), RedError>;
+    fn insert(&mut self, mut key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError>;
 
     fn remove(&mut self, key: K) -> (bool, Option<Box<V>>);
 }
@@ -22,6 +22,7 @@ pub trait RAX<K: RaxKey, V> {
 pub trait RAXIter<K: RaxKey, V>: RAX<K, V> {}
 
 
+#[derive(Clone)]
 pub struct Rax<K: RaxKey, V> {
     pub rax: *mut rax,
     /// Having more than one iterator per Rax is pretty uncommon.
@@ -37,6 +38,7 @@ impl<K: RaxKey, V> Rax<K, V> {
             let r = raxNew();
             Rax {
                 rax: r,
+//                it: std::ptr::null_mut(),
                 it: raxIteratorNew(r),
                 phantom: std::marker::PhantomData,
             }
@@ -54,10 +56,50 @@ impl<K: RaxKey, V> Rax<K, V> {
         unsafe { raxShow(self.rax) }
     }
 
+    pub fn noop(&mut self) {}
+
     ///
     /// Insert a new entry into the RAX
     ///
-    pub fn insert(&mut self, mut key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError> {
+    pub fn insert_null(&mut self, key: K) -> Result<(i32, Option<Box<V>>), RedError> {
+        unsafe {
+            // Allocate a pointer to catch the old value.
+            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
+
+            // Integer values require Big Endian to allow the Rax to fully optimize
+            // storing them since it will be able to compress the prefixes especially
+            // for 64/128bit numbers.
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
+
+            let r = raxInsert(
+                self.rax,
+                // Grab a raw pointer to the key. Keys are most likely allocated
+                // on the stack. The rax will keep it's own copy of the key so we
+                // don't want to keep in in the heap twice and it exists in the
+                // rax in it's compressed form.
+                ptr,
+                len,
+                std::ptr::null_mut(),
+                old,
+            );
+
+            // Was there an existing entry?
+            if old.is_null() {
+                Ok((r, None))
+            } else {
+                // Box the previous value since Rax is done with it and it's our
+                // responsibility now to drop it. Once this Box goes out of scope
+                // the value is dropped and memory reclaimed.
+                Ok((r, Some(Box::from_raw(*old as *mut V))))
+            }
+        }
+    }
+
+    ///
+    /// Insert a new entry into the RAX
+    ///
+    pub fn insert(&mut self, key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError> {
         unsafe {
             // Allocate a pointer to catch the old value.
             let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
@@ -70,20 +112,16 @@ impl<K: RaxKey, V> Rax<K, V> {
             // Integer values require Big Endian to allow the Rax to fully optimize
             // storing them since it will be able to compress the prefixes especially
             // for 64/128bit numbers.
-            key = key.encode();
-            let (ptr, len) = key.as_ptr();
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
 
             let r = raxInsert(
                 self.rax,
-//                sds::new("hello") as *const u8,
-//                sds::SDS::new_from_str("hello").0 as *const u8,
                 // Grab a raw pointer to the key. Keys are most likely allocated
                 // on the stack. The rax will keep it's own copy of the key so we
                 // don't want to keep in in the heap twice and it exists in the
                 // rax in it's compressed form.
                 ptr,
-//                &key as *const _ as *const u8,
-//                key.len(),
                 len,
                 value as *mut V as *mut u8,
                 old,
@@ -104,11 +142,11 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
-    pub fn remove(&mut self, mut key: K) -> (bool, Option<Box<V>>) {
+    pub fn remove(&mut self, key: K) -> (bool, Option<Box<V>>) {
         unsafe {
             let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
-            key = key.encode();
-            let (ptr, len) = key.as_ptr();
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
 
             let r = raxRemove(
                 self.rax,
@@ -128,10 +166,10 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
-    pub fn find_exists(&self, mut key: K) -> (bool, Option<&V>) {
+    pub fn find_exists(&self, key: K) -> (bool, Option<&V>) {
         unsafe {
-            key = key.encode();
-            let (ptr, len) = key.as_ptr();
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
 
             let value = raxFind(
                 self.rax,
@@ -155,10 +193,10 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
-    pub fn find(&self, mut key: K) -> Option<&V> {
+    pub fn find(&self, key: K) -> Option<&V> {
         unsafe {
-            key = key.encode();
-            let (ptr, len) = key.as_ptr();
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
 
             let value = raxFind(
                 self.rax,
@@ -182,8 +220,8 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn exists(&self, mut key: K) -> bool {
         unsafe {
-            key = key.encode();
-            let (ptr, len) = key.as_ptr();
+            let k = key.for_encoding();
+            let (ptr, len) = k.encode();
 
             let value = raxFind(
                 self.rax,
@@ -216,7 +254,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn first(&self) -> bool {
         unsafe {
-            raxSeek(self.it, MIN.as_ptr(), std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MIN, std::ptr::null(), 0) == 1
         }
     }
 
@@ -225,7 +263,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn last(&self) -> bool {
         unsafe {
-            raxSeek(self.it, MAX.as_ptr(), std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MAX, std::ptr::null(), 0) == 1
         }
     }
 
@@ -257,14 +295,14 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
-    pub fn key_slice(&self) -> &[u8] {
+    pub fn key_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts((*self.it).key, (*self.it).key_len as usize) }
     }
 
     ///
     ///
     ///
-    pub fn key_raw(&self) -> (*mut u8, usize) {
+    pub fn key_mut_ptr(&self) -> (*mut u8, usize) {
         unsafe {
             if self.it.is_null() {
                 (std::ptr::null_mut(), 0)
@@ -313,56 +351,82 @@ impl<K: RaxKey, V> Drop for Rax<K, V> {
 }
 
 pub trait RaxKey<RHS = Self>: Clone + Default + std::fmt::Debug {
-    fn as_ptr(&self) -> (*const u8, usize);
+    type Output: RaxKey;
 
-    fn encode(self) -> RHS;
+    fn for_encoding(self) -> Self::Output;
+
+    fn encode(&self) -> (*const u8, usize);
 
     fn decode(ptr: *const u8, len: usize) -> RHS;
 }
 
 impl RaxKey for f32 {
+    type Output = u32;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
+    fn for_encoding(self) -> Self::Output {
+        // Encode as u32 Big Endian
+        self.to_bits().to_be()
+    }
+
+    #[inline]
+    fn encode(&self) -> (*const u8, usize) {
+        // This should never get called since we represent as a u32
         (self as *const _ as *const u8, std::mem::size_of::<f32>())
     }
 
     #[inline]
-    fn encode(self) -> f32 {
-        self
-    }
-
-    #[inline]
     fn decode(ptr: *const u8, len: usize) -> f32 {
-        unsafe { (*(ptr as *mut [u8; std::mem::size_of::<f32>()] as *mut f32)) }
+        unsafe {
+            // We used a BigEndian u32 to encode so let's reverse it
+            f32::from_bits(
+                u32::from_be(
+                    *(ptr as *mut [u8; std::mem::size_of::<u32>()] as *mut u32)
+                )
+            )
+        }
     }
 }
 
 impl RaxKey for f64 {
+    type Output = u64;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
+    fn for_encoding(self) -> Self::Output {
+        // Encode as u64 Big Endian
+        self.to_bits().to_be()
+    }
+
+    #[inline]
+    fn encode(&self) -> (*const u8, usize) {
+        // This should never get called since we represent as a u64
         (self as *const _ as *const u8, std::mem::size_of::<f64>())
     }
 
     #[inline]
-    fn encode(self) -> f64 {
-        self
-    }
-
-    #[inline]
     fn decode(ptr: *const u8, len: usize) -> f64 {
-        unsafe { (*(ptr as *mut [u8; std::mem::size_of::<f64>()] as *mut f64)) }
+        unsafe {
+            // We used a BigEndian u64 to encode so let's reverse it
+            f64::from_bits(
+                u64::from_be(
+                    *(ptr as *mut [u8; std::mem::size_of::<u64>()] as *mut u64)
+                )
+            )
+        }
     }
 }
 
 impl RaxKey for isize {
+    type Output = isize;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, std::mem::size_of::<isize>())
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> isize {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, std::mem::size_of::<isize>())
     }
 
     #[inline]
@@ -372,14 +436,16 @@ impl RaxKey for isize {
 }
 
 impl RaxKey for usize {
+    type Output = usize;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, std::mem::size_of::<usize>())
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> usize {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, std::mem::size_of::<usize>())
     }
 
     #[inline]
@@ -389,14 +455,16 @@ impl RaxKey for usize {
 }
 
 impl RaxKey for i16 {
+    type Output = i16;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 2)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> i16 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 2)
     }
 
     #[inline]
@@ -406,14 +474,16 @@ impl RaxKey for i16 {
 }
 
 impl RaxKey for u16 {
+    type Output = u16;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 2)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> u16 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 2)
     }
 
     #[inline]
@@ -423,14 +493,16 @@ impl RaxKey for u16 {
 }
 
 impl RaxKey for i32 {
+    type Output = i32;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 4)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> i32 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 4)
     }
 
     #[inline]
@@ -440,14 +512,16 @@ impl RaxKey for i32 {
 }
 
 impl RaxKey for u32 {
+    type Output = u32;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 4)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> u32 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 4)
     }
 
     #[inline]
@@ -457,14 +531,16 @@ impl RaxKey for u32 {
 }
 
 impl RaxKey for i64 {
+    type Output = i64;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 8)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> i64 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 8)
     }
 
     #[inline]
@@ -474,14 +550,16 @@ impl RaxKey for i64 {
 }
 
 impl RaxKey for u64 {
+    type Output = u64;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 8)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> u64 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 8)
     }
 
     #[inline]
@@ -491,14 +569,16 @@ impl RaxKey for u64 {
 }
 
 impl RaxKey for i128 {
+    type Output = i128;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 16)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> i128 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 16)
     }
 
     #[inline]
@@ -508,14 +588,16 @@ impl RaxKey for i128 {
 }
 
 impl RaxKey for u128 {
+    type Output = u128;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, 16)
+    fn for_encoding(self) -> Self::Output {
+        self.to_be()
     }
 
     #[inline]
-    fn encode(self) -> u128 {
-        self.to_be()
+    fn encode(&self) -> (*const u8, usize) {
+        (self as *const _ as *const u8, 16)
     }
 
     #[inline]
@@ -525,31 +607,35 @@ impl RaxKey for u128 {
 }
 
 impl RaxKey for SDS {
+    type Output = SDS;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
+    fn for_encoding(self) -> Self::Output {
+        self
+    }
+
+    #[inline]
+    fn encode(&self) -> (*const u8, usize) {
         (self.as_ptr(), self.len())
     }
 
     #[inline]
-    fn encode(self) -> SDS {
-        self
-    }
-
-    #[inline]
     fn decode(ptr: *const u8, len: usize) -> SDS {
-        SDS::new_from_ptr(ptr, len)
+        SDS::from_ptr(ptr, len)
     }
 }
 
 impl<'a> RaxKey for &'a str {
+    type Output = &'a str;
+
     #[inline]
-    fn as_ptr(&self) -> (*const u8, usize) {
-        ((*self).as_ptr(), self.len())
+    fn for_encoding(self) -> Self::Output {
+        self
     }
 
     #[inline]
-    fn encode(self) -> &'a str {
-        self
+    fn encode(&self) -> (*const u8, usize) {
+        ((*self).as_ptr(), self.len())
     }
 
     #[inline]
@@ -727,13 +813,13 @@ impl<V> RawRax<V> {
 
     pub fn first(&self) -> bool {
         unsafe {
-            raxSeek(self.it, MIN.as_ptr(), std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MIN, std::ptr::null(), 0) == 1
         }
     }
 
     pub fn last(&self) -> bool {
         unsafe {
-            raxSeek(self.it, MAX.as_ptr(), std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MAX, std::ptr::null(), 0) == 1
         }
     }
 
@@ -789,14 +875,13 @@ impl<V> Drop for RawRax<V> {
 }
 
 pub struct RaxIterator<V> {
-    //    rax: *mut Rax<V>,
-//    it: *mut raxIterator,
     it: *mut raxIterator,
-    //    it2: raxIterator,
     marker: std::marker::PhantomData<V>,
 }
 
 impl<V> RaxIterator<V> {
+    pub fn new_heap_allocated() {}
+
     pub fn first(&self) -> bool {
         unsafe {
             raxSeek(self.it, MIN.as_ptr(), std::ptr::null(), 0) == 1
@@ -852,13 +937,6 @@ impl<V> Drop for RaxIterator<V> {
     }
 }
 
-pub struct MyMsg<'a>(&'a str);
-
-impl<'a> Drop for MyMsg<'a> {
-    fn drop(&mut self) {
-        println!("dropped -> {}", self.0);
-    }
-}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -917,14 +995,29 @@ extern "C" fn rax_free_with_callback_wrapper<V>(v: *mut libc::c_void) {
     }
 }
 
-pub type raxNodeCallback = extern "C" fn(v: *mut libc::c_void);
+type raxNodeCallback = extern "C" fn(v: *mut libc::c_void);
 
-pub type rax_free_callback = extern "C" fn(v: *mut libc::c_void);
-
+type rax_free_callback = extern "C" fn(v: *mut libc::c_void);
 
 #[allow(improper_ctypes)]
 #[allow(non_snake_case)]
+#[link(name = "redismodule", kind = "static")]
 extern "C" {
+    #[no_mangle]
+    pub static RAX_GREATER: *const u8; // '>'
+#[no_mangle]
+pub static RAX_GREATER_EQUAL: *const u8; // '>='
+#[no_mangle]
+pub static RAX_LESSER: *const u8; // '<'
+#[no_mangle]
+pub static RAX_LESSER_EQUAL: *const u8; // '<='
+#[no_mangle]
+pub static RAX_EQUAL: *const u8; // '='
+#[no_mangle]
+pub static RAX_MIN: *const u8; // '^'
+#[no_mangle]
+pub static RAX_MAX: *const u8; // '$'
+
     #[no_mangle]
     pub static raxNotFound: *mut u8;
 
@@ -942,7 +1035,6 @@ extern "C" {
                  s: *const u8,
                  len: libc::size_t,
                  data: *const u8,
-//                 data: *mut Box<&[u8]>,
                  old: &mut *mut u8) -> libc::c_int;
 
     fn raxTryInsert(rax: *mut rax,
@@ -987,27 +1079,207 @@ extern "C" {
     fn raxSize(rax: *mut rax) -> libc::uint64_t;
 }
 
+pub type RaxOp = *const u8;
+
 
 #[cfg(test)]
 mod tests {
     use key;
-    use rax;
-    use rax::MyMsg;
-    use rax::RawRax;
-    use rax::Rax;
+    use rax::*;
     use sds;
     use std;
     use std::collections;
+    use test::Bencher;
+    use stopwatch::Stopwatch;
+
+    pub struct MyMsg<'a>(&'a str);
+
+    impl<'a> Drop for MyMsg<'a> {
+        fn drop(&mut self) {
+            println!("dropped -> {}", self.0);
+        }
+    }
 
     fn create_map() {}
+
+
+    fn fibonacci(n: u64) -> u64 {
+        match n {
+            0 => 1,
+            1 => 1,
+            n => fibonacci(n - 1) + fibonacci(n - 2),
+        }
+    }
+
+    #[bench]
+    fn bench_fib(b: &mut Bencher) {
+        let mut r = &mut Rax::<u64, &str>::new();
+        for x in 0..2000 {
+            r.insert_null(x);
+        }
+
+        let sw = Stopwatch::start_new();
+
+        for po in 0..1000000 {
+            r.find(300);
+        }
+
+        println!("Thing took {}ms", sw.elapsed_ms());
+    }
+
+    #[test]
+    fn bench_tree() {
+        for ii in 0..10 {
+            let mut r = &mut std::collections::BTreeMap::<u64, &str>::new();
+            for x in 0..2000 {
+                r.insert(x, "");
+            }
+
+            let sw = Stopwatch::start_new();
+
+            let xx = 300;
+            for po in 0..1000000 {
+                r.get(&xx);
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+        }
+    }
+
+    #[test]
+    fn bench_rax_find() {
+        for ii in 0..10 {
+            let mut r = &mut Rax::<u64, &str>::new();
+            for x in 0..2000 {
+                r.insert_null(x);
+            }
+
+            match r.find(1601) {
+                Some(v) => println!("{}", v),
+                None => {}
+            }
+
+            let sw = Stopwatch::start_new();
+
+            for po in 0..1000000 {
+                r.find(1601);
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+        }
+    }
+
+    #[test]
+    fn bench_hash_find() {
+        for ii in 0..10 {
+            let mut r = &mut std::collections::HashMap::<u64, &str>::new();
+//            r.insert_null(300);
+            for x in 0..2000 {
+                r.insert(x, "");
+            }
+
+            let sw = Stopwatch::start_new();
+
+            let xx = 300;
+            for po in 0..1000000 {
+                r.get(&xx);
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+        }
+    }
+
+    #[test]
+    fn bench_rax_insert() {
+        for ii in 0..10 {
+            let mut r = &mut Rax::<u64, &str>::new();
+//
+            let sw = Stopwatch::start_new();
+
+            for x in 0..1000000 {
+                r.insert(x, Box::new(""));
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+            println!("Size {}", r.size());
+        }
+    }
+
+    #[test]
+    fn bench_rax_insert_show() {
+        let mut r = &mut Rax::<u64, &str>::new();
+//
+        let sw = Stopwatch::start_new();
+
+        for x in 0..1000 {
+            r.insert(x, Box::new(""));
+        }
+
+        r.show();
+        println!("Thing took {}ms", sw.elapsed_ms());
+        println!("Size {}", r.size());
+    }
+
+    #[test]
+    fn bench_rax_replace() {
+        for ii in 0..10 {
+            let mut r = &mut Rax::<u64, &str>::new();
+
+            for x in 0..1000000 {
+                r.insert(x, Box::new(""));
+            }
+//
+            let sw = Stopwatch::start_new();
+
+            for x in 0..1000000 {
+                r.insert(x, Box::new(""));
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+            println!("Size {}", r.size());
+        }
+    }
+
+    #[test]
+    fn bench_tree_insert() {
+        for ii in 0..10 {
+            let mut r = &mut std::collections::BTreeMap::<u64, &str>::new();
+//
+            let sw = Stopwatch::start_new();
+
+            for x in 0..1000000 {
+                r.insert(x, "");
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+        }
+    }
+
+    #[test]
+    fn bench_hashmap_insert() {
+        for ii in 0..10 {
+            let mut r = &mut std::collections::HashMap::<u64, &str>::new();
+//
+            let sw = Stopwatch::start_new();
+
+            for x in 0..1000000 {
+                r.insert(x, "");
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+            println!("Size {}", r.len());
+        }
+    }
 
     #[test]
     fn key_str() {
         let mut r = Rax::<&str, MyMsg>::new();
         let mut z: u64 = 1;
 
+        let key = "hello-way";
+
         r.insert(
-            "hello-way",
+            key,
             Box::new(MyMsg("world 80")),
         );
         r.insert(
@@ -1023,6 +1295,13 @@ mod tests {
             "hello",
             Box::new(MyMsg("world 100")),
         );
+
+        {
+            match r.find("hello") {
+                Some(v) => println!("Found {}", v.0),
+                None => println!("Not Found")
+            }
+        }
 
         r.show();
 
@@ -1074,43 +1353,6 @@ mod tests {
     }
 
     #[test]
-    fn key_f64_as_u64() {
-        println!("sizeof(Rax) {}", std::mem::size_of::<Rax<u64, MyMsg>>());
-
-        let mut r = Rax::<u64, MyMsg>::new();
-        let mut z: u64 = 1;
-
-        r.insert(
-            100.01_f64.to_bits(),
-            Box::new(MyMsg("world 100")),
-        );
-        r.insert(
-            80.20_f64.to_bits(),
-            Box::new(MyMsg("world 80")),
-        );
-        r.insert(
-            100.00_f64.to_bits(),
-            Box::new(MyMsg("world 200")),
-        );
-        r.insert(
-            99.10_f64.to_bits(),
-            Box::new(MyMsg("world 1")),
-        );
-
-        r.show();
-
-        r.first();
-        while r.next() {
-            println!("{}", f64::from_bits(r.key()));
-        }
-        r.last();
-        while r.prev() {
-            println!("{}", f64::from_bits(r.key()));
-        }
-    }
-
-
-    #[test]
     fn key_u64() {
         println!("sizeof(Rax) {}", std::mem::size_of::<Rax<u64, MyMsg>>());
 
@@ -1152,11 +1394,11 @@ mod tests {
         let mut r = Rax::<sds::SDS, MyMsg>::new();
 
         r.insert(
-            sds::SDS::new_from_str("hello"),
+            sds::SDS::new("hello"),
             Box::new(MyMsg("world x10")),
         );
 
-        match r.find(sds::SDS::new_from_str("hi")) {
+        match r.find(sds::SDS::new("hi")) {
             Some(v) => {
                 println!("Found: {}", v.0);
             }
@@ -1166,7 +1408,7 @@ mod tests {
         };
 
 
-        match r.find(sds::SDS::new_from_str("hello")) {
+        match r.find(sds::SDS::new("hello")) {
             Some(v) => {
                 println!("Found: {}", v.0);
             }
@@ -1175,21 +1417,21 @@ mod tests {
             }
         };
 
-        r.remove(sds::SDS::new_from_str("hello"));
+        r.remove(sds::SDS::new("hello"));
         r.insert(
-            sds::SDS::new_from_str("hello"),
+            sds::SDS::new("hello"),
             Box::new(MyMsg("world x10")),
         );
         r.insert(
-            sds::SDS::new_from_str("hello-16"),
+            sds::SDS::new("hello-16"),
             Box::new(MyMsg("world x11")),
         );
         r.insert(
-            sds::SDS::new_from_str("hello-20"),
+            sds::SDS::new("hello-20"),
             Box::new(MyMsg("world x12")),
         );
         r.insert(
-            sds::SDS::new_from_str("hello-01"),
+            sds::SDS::new("hello-01"),
             Box::new(MyMsg("world x13")),
         );
 

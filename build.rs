@@ -21,7 +21,8 @@ fn main() {
         .file("c/sha1.c")
         .file("c/dict.c")
         .file("c/util.c")
-        .file("c/stream.c")
+//        .file("c/stream.c")
+//        .file("c/stream_ext.c")
         .file("src/redismodule.c")
         .include("c/")
         .compile("libredismodule.a");

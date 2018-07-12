@@ -8,6 +8,14 @@
 #include "rax.h"
 #include "endianconv.h"
 
+extern const char *RAX_GREATER = ">";
+extern const char *RAX_GREATER_EQUAL = ">=";
+extern const char *RAX_LESSER = "<";
+extern const char *RAX_LESSER_EQUAL = "<=";
+extern const char *RAX_EQUAL = "=";
+extern const char *RAX_MIN = "^";
+extern const char *RAX_MAX = "$";
+
 raxIterator *raxIteratorNew(rax *rt);
 void raxIteratorFree(raxIterator *it);
 void *raxIteratorData(raxIterator *it);

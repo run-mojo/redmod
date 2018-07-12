@@ -1,6 +1,9 @@
 use libc;
-use rax::RawRax;
+use rax::*;
 use std;
+use listpack::Listpack;
+use sds::SDS;
+use arrayvec::ArrayVec;
 
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024 * 8;
 const DEFAULT_CHUNKS_PER_FILE: u64 = 8;
@@ -21,15 +24,21 @@ pub enum Jobs {
 }
 
 /// Active job structure
+#[repr(packed)]
 pub struct Job {
     nack: usize,
 
     // Support upto 48 byte dedupe keys
     dup_len: u8,
-    dup: [u8; 48],
+//    dup: [u8; 48],
 }
 
-// Mimic C version
+impl Drop for Job {
+    fn drop(&mut self) {
+        if self.dup_len > 0 {}
+    }
+}
+
 #[repr(C)]
 pub struct StreamID {
     pub ms: libc::uint64_t,
@@ -46,12 +55,15 @@ pub struct File {
     pub first: StreamID,
     pub last: StreamID,
     //
-    pub list: Vec<Chunk>,
+    pub list: ArrayVec<Chunk>,
 }
 
+///
+#[repr(packed)]
 pub struct Chunk {
     pub first: StreamID,
     pub last: StreamID,
+    ///
     pub state: ChunkState,
 
     ///
@@ -62,6 +74,11 @@ pub enum Task {
     Load(String)
 }
 
+pub struct ConsumerGroup;
+
+pub struct Consumer;
+
+/// This is the core Redis Data Type.
 pub struct JobStream {
     flags: u32,
     /// Chunk of jobs to be consumed
@@ -72,6 +89,8 @@ pub struct JobStream {
     tail: Box<Chunk>,
     /// Radix tree of all chunks.
     chunks: Box<RawRax<Chunk>>,
+    /// De-duplication RAX
+    dup: Option<Box<Rax<SDS, Job>>>,
     /// Current configuration to control the behavior and memory consumption.
     config: Config,
     /// Dequeue of tasks.
@@ -81,5 +100,19 @@ pub struct JobStream {
 impl JobStream {
     fn tick(&mut self) {
         // Perform cleanup and timeouts
+    }
+
+    fn remove_job(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std;
+    use sliced::*;
+
+    #[test]
+    fn test_packing() {
+        println!("sizeof<Job> =         {}", std::mem::size_of::<Job>());
+        println!("sizeof<StreamID> =    {}", std::mem::size_of::<StreamID>());
     }
 }

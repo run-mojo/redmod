@@ -1,6 +1,7 @@
 use libc;
 use std;
 use std::cmp::Ordering;
+use std::fmt;
 
 const SDS_TYPE_5: libc::c_char = 0;
 const SDS_TYPE_8: libc::c_char = 1;
@@ -11,7 +12,10 @@ const SDS_LLSTR_SIZE: libc::c_int = 21;
 const SDS_TYPE_MASK: libc::c_int = 7;
 const SDS_TYPE_BITS: libc::c_int = 3;
 
-#[derive(Debug)]
+pub type Sds = *mut libc::c_char;
+
+
+#[derive(Eq, Debug)]
 #[repr(C)]
 pub struct SDS(pub Sds);
 
@@ -27,26 +31,65 @@ impl Default for SDS {
     }
 }
 
-//impl Ord for SDS {
-//    fn cmp(&self, other: &Self) -> Ordering {
-//        unsafe { sdscmp(self.0, other.0) }
-//    }
-//}
+impl PartialEq for SDS {
+    fn eq(&self, other: &SDS) -> bool {
+        unsafe { sdscmp(self.0, other.0) == 0 }
+    }
+
+    fn ne(&self, other: &SDS) -> bool {
+        unsafe { sdscmp(self.0, other.0) != 0 }
+    }
+}
+
+impl PartialOrd for SDS {
+    fn partial_cmp(&self, other: &SDS) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SDS {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match unsafe { sdscmp(self.0, other.0) } {
+            -1 => Ordering::Less,
+            0 => Ordering::Equal,
+            1 => Ordering::Greater,
+            _ => Ordering::Greater
+        }
+    }
+}
+
+impl fmt::Display for SDS {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        f.write_str(self.to_str());
+        Ok(())
+    }
+}
+
+impl Drop for SDS {
+    fn drop(&mut self) {
+        free(self.0)
+    }
+}
 
 impl SDS {
     #[inline]
-    pub fn new() -> SDS {
+    pub fn empty() -> SDS {
         SDS(empty())
     }
 
     #[inline]
-    pub fn new_from_ptr(init: *const u8, initlen: usize) -> SDS {
+    pub fn new(s: &str) -> SDS {
+        SDS(new_len(s))
+    }
+
+    #[inline]
+    pub fn from_ptr(init: *const u8, initlen: usize) -> SDS {
         unsafe { SDS(sdsnewlen(init, initlen)) }
     }
 
     #[inline]
-    pub fn new_from_str(s: &str) -> SDS {
-        SDS(new_len(s))
+    pub fn from_cstr(s: *const u8) -> SDS {
+        unsafe { SDS(sdsnew(s)) }
     }
 
     #[inline]
@@ -54,6 +97,7 @@ impl SDS {
         len(self.0)
     }
 
+    #[inline]
     pub fn as_ptr(&self) -> *const u8 {
         self.0 as *const u8
     }
@@ -68,7 +112,7 @@ impl SDS {
         hdr_size(self.0)
     }
 
-    /// Return the total size of the allocation of the specifed sds string,
+    /// Return the total size of the allocation of the specified sds string,
     /// including:
     /// 1) The sds header before the pointer.
     /// 2) The string.
@@ -182,30 +226,6 @@ impl SDS {
         true
     }
 }
-
-impl std::fmt::Display for SDS {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        f.write_str(self.to_str());
-        Ok(())
-    }
-}
-
-impl Drop for SDS {
-    fn drop(&mut self) {
-        free(self.0)
-    }
-}
-
-pub type Sds = *mut libc::c_char;
-
-
-//#[lang = "mut_ptr"]
-
-//impl Drop for SDS {
-//    fn drop(&mut self) {
-//        unsafe { sds_free(*self) }
-//    }
-//}
 
 #[inline]
 pub fn new_raw(s: *const u8, len: usize) -> Sds {
@@ -394,10 +414,10 @@ pub fn hdr_size(s: Sds) -> libc::c_int {
     unsafe { sds_get_hdr_size(s) }
 }
 
+#[link(name = "redismodule", kind = "static")]
 extern "C" {
     #[no_mangle]
     pub static SDS_NOINIT: *mut libc::c_char;
-
 
     pub fn sdsnewlen(init: *const u8, initlen: libc::size_t) -> Sds;
 
@@ -447,7 +467,19 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use sds;
+    use sds::SDS;
     use std;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn test_cmp() {
+        let s1 = SDS::new("test");
+        let s2 = SDS::new("test1");
+
+        assert_eq!(s1.cmp(&s2), Ordering::Less);
+        assert_eq!(s2.cmp(&s1), Ordering::Greater);
+        assert_eq!(SDS::new("test").cmp(&s1), Ordering::Equal);
+    }
 
     #[test]
     fn test_len() {
@@ -455,7 +487,7 @@ mod tests {
         println!("{}", std::mem::size_of::<sds::Sds>());
         let mut s = sds::new_len("hello");
 
-        let mut ss = sds::SDS::new_from_str("hello");
+        let mut ss = sds::SDS::new("hello");
 
         println!("HDR Size: {}", ss.hdr_size());
 

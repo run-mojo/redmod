@@ -11,15 +11,15 @@ pub enum Where {
 }
 
 
-pub struct ListPack {
+pub struct Listpack {
     lp: *mut listpack
 }
 
-impl ListPack {
+impl Listpack {
     pub fn is_installed(&self) {}
 
-    pub fn new() -> ListPack {
-        return ListPack { lp: unsafe { lpNew() } };
+    pub fn new() -> Listpack {
+        return Listpack { lp: unsafe { lpNew() } };
     }
 
     pub fn length(&self) -> u32 {
@@ -106,7 +106,7 @@ impl ListPack {
 }
 
 // Map Drop -> "lpFree"
-impl Drop for ListPack {
+impl Drop for Listpack {
     fn drop(&mut self) {
         unsafe { lpFree(self.lp) }
     }
@@ -116,6 +116,7 @@ pub struct listpack;
 
 #[allow(improper_ctypes)]
 #[allow(non_snake_case)]
+#[link(name = "redismodule", kind = "static")]
 extern "C" {
     fn lpNew() -> *mut listpack;
 
@@ -156,12 +157,12 @@ extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use ::listpack::ListPack;
+    use ::listpack::Listpack;
 
 
     #[test]
     fn it_works() {
-        let mut lp = ListPack::new();
+        let mut lp = Listpack::new();
 
         lp.append_str("hello");
         assert_eq!(lp.length(), 1);
