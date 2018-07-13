@@ -1,6 +1,5 @@
 //extern crate libc;
 
-use error;
 use error::RedError;
 use libc;
 //use std::collections::HashMap;
@@ -127,14 +126,14 @@ extern "C" fn sliced_timer_callback_wrapper<F>(
     closure: *mut libc::c_void) where F: Fn() {
     let closure = closure as *mut F;
     unsafe {
-        let res = (*closure)();
+        (*closure)();
     }
 }
 
 impl Redis {
     /// Executes the closure on the Redis event-loop after the specified
     /// time in milliseconds have elapsed.
-    pub fn start_timer<F>(&self, millis: i64, f: F) -> TimerID where F: Fn() {
+    pub fn start_timer<F>(&self, millis: i64, _f: F) -> TimerID where F: Fn() {
         let mut x = 0 as *mut u8;
         mod_api::create_timer(
             self.ctx,
@@ -145,7 +144,7 @@ impl Redis {
 
     /// Executes the closure on the Redis event-loop.
     /// This can be called from background threads.
-    pub fn run<F>(&self, f: F) -> TimerID where F: Fn() {
+    pub fn run<F>(&self, _f: F) -> TimerID where F: Fn() {
         let mut x = 0 as *mut u8;
         mod_api::create_timer(
             self.ctx,

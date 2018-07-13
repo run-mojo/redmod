@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use libc;
+use sds::*;
 
 const LP_INTBUF_SIZE: libc::c_int = 21;
 
@@ -46,12 +47,19 @@ impl Listpack {
         };
     }
 
-    pub fn insert(&mut self,
-                  ele: *const u8,
-                  size: u32,
-                  p: *mut u8,
-                  w: Where,
-                  newp: *mut *mut u8) {
+    pub fn insert_sds(&mut self, _sds: SDS) {
+//        unsafe {
+//            self.lp = lpInsert(self.lp, sds.as_ptr(), sds.len(),)
+//        }
+    }
+
+    pub fn insert(
+        &mut self,
+        ele: *const u8,
+        size: u32,
+        p: *mut u8,
+        w: Where,
+        newp: *mut *mut u8) {
         self.lp = unsafe {
             lpInsert(
                 self.lp,
@@ -112,46 +120,86 @@ impl Drop for Listpack {
     }
 }
 
+#[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
 pub struct listpack;
 
 #[allow(improper_ctypes)]
 #[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
 #[link(name = "redismodule", kind = "static")]
 extern "C" {
     fn lpNew() -> *mut listpack;
 
     fn lpFree(lp: *mut listpack);
 
-    fn lpInsert(lp: *mut listpack,
-                ele: *const u8,
-                size: libc::uint32_t,
-                p: *mut u8,
-                wh: libc::c_int,
-                newp: *mut *mut u8) -> *mut listpack;
+    fn lpInsert(
+        lp: *mut listpack,
+        ele: *const u8,
+        size: libc::uint32_t,
+        p: *mut u8,
+        wh: libc::c_int,
+        newp: *mut *mut u8,
+    ) -> *mut listpack;
 
-    fn lpAppend(lp: *mut listpack,
-                ele: *const u8,
-                size: libc::uint32_t) -> *mut listpack;
-    
-    fn lpAppendInteger(lp: *mut listpack, value: libc::int64_t) -> *mut listpack;
+    fn lpAppend(
+        lp: *mut listpack,
+        ele: *const u8,
+        size: libc::uint32_t) -> *mut listpack;
 
-    fn lpDelete(lp: *mut listpack,
-                p: *mut u8,
-                newp: *mut *mut u8) -> *mut listpack;
+    fn lpDelete(
+        lp: *mut listpack,
+        p: *mut u8,
+        newp: *mut *mut u8,
+    ) -> *mut listpack;
 
-    fn lpLength(lp: *mut listpack) -> libc::uint32_t;
+    fn lpLength(
+        lp: *mut listpack
+    ) -> libc::uint32_t;
 
-    fn lpGet(lp: *mut listpack, count: *mut libc::int64_t, intbuf: *mut u8) -> *mut u8;
+    fn lpGet(
+        p: *mut u8,
+        count: *mut libc::int64_t,
+        intbuf: *mut u8,
+    ) -> *mut u8;
 
-    fn lpGetInteger(ele: *mut u8) -> libc::int64_t;
+    fn lpGetInteger(
+        ele: *mut u8
+    ) -> libc::int64_t;
 
     fn lpFirst(lp: *mut listpack) -> *mut u8;
-    fn lpLast(lp: *mut listpack) -> *mut u8;
-    fn lpNext(lp: *mut listpack, p: *mut u8) -> *mut u8;
-    fn lpPrev(lp: *mut listpack, p: *mut u8) -> *mut u8;
 
-    fn lpBytes(lp: *mut listpack) -> libc::uint32_t;
-    fn lpSeek(lp: *mut listpack, index: libc::c_long) -> *mut u8;
+    fn lpLast(lp: *mut listpack) -> *mut u8;
+
+    fn lpNext(
+        lp: *mut listpack,
+        p: *mut u8,
+    ) -> *mut u8;
+
+    fn lpPrev(
+        lp: *mut listpack,
+        p: *mut u8,
+    ) -> *mut u8;
+
+    fn lpBytes(
+        lp: *mut listpack
+    ) -> libc::uint32_t;
+
+    fn lpSeek(
+        lp: *mut listpack,
+        index: libc::c_long,
+    ) -> *mut u8;
+
+    fn lpAppendInteger(
+        lp: *mut listpack,
+        value: libc::int64_t,
+    ) -> *mut listpack;
+
+    fn lpReplaceInteger(
+        lp: *mut listpack,
+        pos: *mut *mut u8,
+        value: libc::int64_t,
+    ) -> *mut listpack;
 }
 
 

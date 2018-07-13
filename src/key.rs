@@ -1,4 +1,3 @@
-use std;
 use std::fmt::Debug;
 
 pub trait Key: Copy + PartialEq + Ord + Default + Debug {

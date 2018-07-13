@@ -1,10 +1,9 @@
 use error::RedError;
 use libc;
-use sds;
 use sds::SDS;
-use sds::Sds;
 use std;
 use std::ptr;
+use std::mem::{transmute, size_of};
 
 /// Redis has a beautiful Radix Tree implementation in ANSI C.
 /// This brings it to Rust. Great effort went into trying this zero overhead.
@@ -14,7 +13,7 @@ pub trait RAX<K: RaxKey, V> {
 
     fn find(&self, key: K) -> Option<&V>;
 
-    fn insert(&mut self, mut key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError>;
+    fn insert(&mut self, key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError>;
 
     fn remove(&mut self, key: K) -> (bool, Option<Box<V>>);
 }
@@ -64,7 +63,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     pub fn insert_null(&mut self, key: K) -> Result<(i32, Option<Box<V>>), RedError> {
         unsafe {
             // Allocate a pointer to catch the old value.
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
+            let old: &mut *mut u8 = &mut ptr::null_mut();
 
             // Integer values require Big Endian to allow the Rax to fully optimize
             // storing them since it will be able to compress the prefixes especially
@@ -102,12 +101,12 @@ impl<K: RaxKey, V> Rax<K, V> {
     pub fn insert(&mut self, key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError> {
         unsafe {
             // Allocate a pointer to catch the old value.
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
+            let old: &mut *mut u8 = &mut ptr::null_mut();
 
             // Leak the boxed value as we hand it over to Rax to keep track of.
             // These must be heap allocated unless we want to store sizeof(usize) or
             // less bytes, then the value can be the pointer.
-            let mut value: &mut V = Box::leak(data);
+            let value: &mut V = Box::leak(data);
 
             // Integer values require Big Endian to allow the Rax to fully optimize
             // storing them since it will be able to compress the prefixes especially
@@ -144,7 +143,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn remove(&mut self, key: K) -> (bool, Option<Box<V>>) {
         unsafe {
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
+            let old: &mut *mut u8 = &mut ptr::null_mut();
             let k = key.for_encoding();
             let (ptr, len) = k.encode();
 
@@ -185,7 +184,7 @@ impl<K: RaxKey, V> Rax<K, V> {
                 // transmute to the value so we don't drop the actual value accidentally.
                 // While the key associated to the value is in the RAX then we cannot
                 // drop it.
-                (true, Some(std::mem::transmute(value)))
+                (true, Some(transmute(value)))
             }
         }
     }
@@ -218,7 +217,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
-    pub fn exists(&self, mut key: K) -> bool {
+    pub fn exists(&self, key: K) -> bool {
         unsafe {
             let k = key.for_encoding();
             let (ptr, len) = k.encode();
@@ -254,7 +253,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn first(&self) -> bool {
         unsafe {
-            raxSeek(self.it, RAX_MIN, std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MIN, ptr::null(), 0) == 1
         }
     }
 
@@ -263,7 +262,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn last(&self) -> bool {
         unsafe {
-            raxSeek(self.it, RAX_MAX, std::ptr::null(), 0) == 1
+            raxSeek(self.it, RAX_MAX, ptr::null(), 0) == 1
         }
     }
 
@@ -302,6 +301,19 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     ///
     ///
+    pub fn key_ptr(&self) -> (*const u8, usize) {
+        unsafe {
+            if self.it.is_null() {
+                (ptr::null(), 0)
+            } else {
+                ((*self.it).key as *const u8, (*self.it).key_len)
+            }
+        }
+    }
+
+    ///
+    ///
+    ///
     pub fn key_mut_ptr(&self) -> (*mut u8, usize) {
         unsafe {
             if self.it.is_null() {
@@ -317,7 +329,7 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn data(&self) -> Option<&V> {
         unsafe {
-            let data: *mut libc::c_void = ((*self.it).data);
+            let data: *mut libc::c_void = (*self.it).data;
             if data.is_null() {
                 None
             } else {
@@ -377,6 +389,9 @@ impl RaxKey for f32 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> f32 {
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
         unsafe {
             // We used a BigEndian u32 to encode so let's reverse it
             f32::from_bits(
@@ -400,16 +415,19 @@ impl RaxKey for f64 {
     #[inline]
     fn encode(&self) -> (*const u8, usize) {
         // This should never get called since we represent as a u64
-        (self as *const _ as *const u8, std::mem::size_of::<f64>())
+        (self as *const _ as *const u8, size_of::<f64>())
     }
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> f64 {
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
         unsafe {
             // We used a BigEndian u64 to encode so let's reverse it
             f64::from_bits(
                 u64::from_be(
-                    *(ptr as *mut [u8; std::mem::size_of::<u64>()] as *mut u64)
+                    *(ptr as *mut [u8; size_of::<u64>()] as *mut u64)
                 )
             )
         }
@@ -426,12 +444,15 @@ impl RaxKey for isize {
 
     #[inline]
     fn encode(&self) -> (*const u8, usize) {
-        (self as *const _ as *const u8, std::mem::size_of::<isize>())
+        (self as *const _ as *const u8, size_of::<isize>())
     }
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> isize {
-        unsafe { isize::from_be((*(ptr as *mut [u8; std::mem::size_of::<isize>()] as *mut isize))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { isize::from_be(*(ptr as *mut [u8; size_of::<isize>()] as *mut isize)) }
     }
 }
 
@@ -450,7 +471,10 @@ impl RaxKey for usize {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> usize {
-        unsafe { usize::from_be((*(ptr as *mut [u8; std::mem::size_of::<usize>()] as *mut usize))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { usize::from_be(*(ptr as *mut [u8; std::mem::size_of::<usize>()] as *mut usize)) }
     }
 }
 
@@ -469,7 +493,10 @@ impl RaxKey for i16 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> i16 {
-        unsafe { i16::from_be((*(ptr as *mut [u8; 2] as *mut i16))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { i16::from_be(*(ptr as *mut [u8; 2] as *mut i16)) }
     }
 }
 
@@ -488,7 +515,10 @@ impl RaxKey for u16 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> u16 {
-        unsafe { u16::from_be((*(ptr as *mut [u8; 2] as *mut u16))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { u16::from_be(*(ptr as *mut [u8; 2] as *mut u16)) }
     }
 }
 
@@ -507,7 +537,10 @@ impl RaxKey for i32 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> i32 {
-        unsafe { i32::from_be((*(ptr as *mut [u8; 4] as *mut i32))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { i32::from_be(*(ptr as *mut [u8; 4] as *mut i32)) }
     }
 }
 
@@ -526,7 +559,10 @@ impl RaxKey for u32 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> u32 {
-        unsafe { u32::from_be((*(ptr as *mut [u8; 4] as *mut u32))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { u32::from_be(*(ptr as *mut [u8; 4] as *mut u32)) }
     }
 }
 
@@ -545,7 +581,10 @@ impl RaxKey for i64 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> i64 {
-        unsafe { i64::from_be((*(ptr as *mut [u8; 8] as *mut i64))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { i64::from_be(*(ptr as *mut [u8; 8] as *mut i64)) }
     }
 }
 
@@ -564,7 +603,10 @@ impl RaxKey for u64 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> u64 {
-        unsafe { u64::from_be((*(ptr as *mut [u8; 8] as *mut u64))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { u64::from_be(*(ptr as *mut [u8; 8] as *mut u64)) }
     }
 }
 
@@ -583,7 +625,10 @@ impl RaxKey for i128 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> i128 {
-        unsafe { i128::from_be((*(ptr as *mut [u8; 16] as *mut i128))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { i128::from_be(*(ptr as *mut [u8; 16] as *mut i128)) }
     }
 }
 
@@ -602,7 +647,10 @@ impl RaxKey for u128 {
 
     #[inline]
     fn decode(ptr: *const u8, len: usize) -> u128 {
-        unsafe { u128::from_be((*(ptr as *mut [u8; 16] as *mut u128))) }
+        if len != size_of::<Self>() {
+            return Self::default()
+        }
+        unsafe { u128::from_be(*(ptr as *mut [u8; 16] as *mut u128)) }
     }
 }
 
@@ -648,232 +696,6 @@ impl<'a> RaxKey for &'a str {
     }
 }
 
-
-//#[derive(Clone)]
-pub struct RawRax<V> {
-    rax: *mut rax,
-    it: *mut raxIterator,
-    marker: std::marker::PhantomData<V>,
-}
-
-impl<V> RawRax<V> {
-    pub fn new_without_iterator() -> RawRax<V> {
-        unsafe {
-            let mut r = raxNew();
-            RawRax {
-                rax: r,
-                it: std::ptr::null_mut(),
-                marker: std::marker::PhantomData,
-            }
-        }
-    }
-    pub fn new() -> RawRax<V> {
-        unsafe {
-            let mut r = raxNew();
-            RawRax {
-                rax: r,
-                it: raxIteratorNew(r),
-                marker: std::marker::PhantomData,
-            }
-        }
-    }
-
-    pub fn size(&self) -> libc::uint64_t {
-        unsafe { raxSize(self.rax) }
-    }
-
-    pub fn show(&self) {
-        unsafe { raxShow(self.rax) }
-    }
-
-    pub fn insert_raw_val(&mut self, key: *const u8, key_len: usize, data: Box<V>) -> Result<(libc::c_int, Option<Box<V>>), RedError> {
-        unsafe {
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
-
-            // Leak the boxed value as we hand it over to Rax to keep track of.
-            let mut leaked: &mut V = Box::leak(data);
-
-            let r = raxInsert(
-                self.rax,
-                key,
-                key_len,
-                leaked as *mut V as *mut u8,
-                old,
-            );
-
-            if (old).is_null() {
-                Ok((r, None))
-            } else {
-                // Box the previous value since Rax is done with it and it's our
-                // responsibility now to drop it. Once this Box goes out of scope
-                // the value is dropped and memory reclaimed.
-                Ok((r, Some(Box::from_raw(*old as *mut V))))
-            }
-        }
-    }
-
-    pub fn insert_str(&mut self, key: &str, data: Box<V>) -> Result<(libc::c_int, Option<Box<V>>), RedError> {
-        self.insert(key.as_ref(), data)
-    }
-
-    pub fn insert(&mut self, key: &[u8], data: Box<V>) -> Result<(libc::c_int, Option<Box<V>>), RedError> {
-        unsafe {
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
-
-            // Leak the boxed value as we hand it over to Rax to keep track of.
-            let mut leaked: &mut V = Box::leak(data);
-
-            let r = raxInsert(
-                self.rax,
-                key.as_ptr(),
-                key.len(),
-                leaked as *mut V as *mut u8,
-                old,
-            );
-
-            if (old).is_null() {
-                Ok((r, None))
-            } else {
-                // Box the previous value since Rax is done with it and it's our
-                // responsibility now to drop it. Once this Box goes out of scope
-                // the value is dropped and memory reclaimed.
-                Ok((r, Some(Box::from_raw(*old as *mut V))))
-            }
-        }
-    }
-
-    pub fn remove(&mut self, key: &[u8]) -> (bool, Option<Box<V>>) {
-        unsafe {
-            let mut old: &mut *mut u8 = &mut std::ptr::null_mut();
-
-            let r = raxRemove(
-                self.rax,
-                key.as_ptr(),
-                key.len(),
-                old,
-            );
-
-            if old.is_null() {
-                (r == 1, None)
-            } else {
-                (r == 1, Some(Box::from_raw(*old as *mut V)))
-            }
-        }
-    }
-
-    ///
-    pub fn find_exists(&self, key: &[u8]) -> (bool, Option<&V>) {
-        unsafe {
-            let value = raxFind(
-                self.rax,
-                key.as_ptr(),
-                key.len(),
-            );
-
-            if value.is_null() {
-                (true, None)
-            } else if value == raxNotFound {
-                (false, None)
-            } else {
-                // transmute to the value so we don't drop the actual value accidentally.
-                // While the key associated to the value is in the RAX then we cannot
-                // drop it.
-                (true, Some(std::mem::transmute(value)))
-            }
-        }
-    }
-
-    pub fn find(&self, key: &[u8]) -> Option<&V> {
-        unsafe {
-            let value = raxFind(
-                self.rax,
-                key.as_ptr(),
-                key.len(),
-            );
-
-            if value.is_null() || value == raxNotFound {
-                None
-            } else {
-                // transmute to the value so we don't drop the actual value accidentally.
-                // While the key associated to the value is in the RAX then we cannot
-                // drop it.
-                Some(std::mem::transmute(value))
-            }
-        }
-    }
-
-    pub fn iterator(&self) -> RaxIterator<V> {
-        unsafe {
-            RaxIterator {
-                it: raxIteratorNew(self.rax),
-                marker: std::marker::PhantomData,
-            }
-        }
-    }
-
-    pub fn first(&self) -> bool {
-        unsafe {
-            raxSeek(self.it, RAX_MIN, std::ptr::null(), 0) == 1
-        }
-    }
-
-    pub fn last(&self) -> bool {
-        unsafe {
-            raxSeek(self.it, RAX_MAX, std::ptr::null(), 0) == 1
-        }
-    }
-
-    pub fn prev(&self) -> bool {
-        unsafe {
-            raxPrev(self.it) == 1
-        }
-    }
-
-    pub fn next(&self) -> bool {
-        unsafe {
-            raxNext(self.it) == 1
-        }
-    }
-
-    pub fn key(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts((*self.it).key, (*self.it).key_len as usize) }
-    }
-
-    pub fn data(&self) -> Option<&V> {
-        unsafe {
-            let data: *mut libc::c_void = ((*self.it).data);
-            if data.is_null() {
-                None
-            } else {
-                Some(std::mem::transmute(data as *mut u8))
-            }
-        }
-    }
-
-    pub fn seek(&self, op: *const u8, ele: &[u8]) -> bool {
-        unsafe {
-            raxSeek(self.it, op, ele.as_ptr(), ele.len() as libc::size_t) == 1
-        }
-    }
-}
-
-//
-impl<V> Drop for RawRax<V> {
-    fn drop(&mut self) {
-        unsafe {
-            // Cleanup RAX
-            raxFreeWithCallback(self.rax, rax_free_with_callback_wrapper::<V>);
-
-            // Cleanup iterator.
-            if !self.it.is_null() {
-                raxStop(self.it);
-                raxIteratorFree(self.it);
-                self.it = std::ptr::null_mut();
-            }
-        }
-    }
-}
-
 pub struct RaxIterator<V> {
     it: *mut raxIterator,
     marker: std::marker::PhantomData<V>,
@@ -912,7 +734,7 @@ impl<V> RaxIterator<V> {
 
     pub fn data(&self) -> Option<&V> {
         unsafe {
-            let data: *mut libc::c_void = ((*self.it).data);
+            let data: *mut libc::c_void = (*self.it).data;
             if data.is_null() {
                 None
             } else {
@@ -995,12 +817,15 @@ extern "C" fn rax_free_with_callback_wrapper<V>(v: *mut libc::c_void) {
     }
 }
 
+#[allow(non_camel_case_types)]
 type raxNodeCallback = extern "C" fn(v: *mut libc::c_void);
 
-type rax_free_callback = extern "C" fn(v: *mut libc::c_void);
+
+type RaxFreeCallback = extern "C" fn(v: *mut libc::c_void);
 
 #[allow(improper_ctypes)]
 #[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
 #[link(name = "redismodule", kind = "static")]
 extern "C" {
     #[no_mangle]
@@ -1029,7 +854,7 @@ pub static RAX_MAX: *const u8; // '$'
 
     fn raxFree(rax: *mut rax);
 
-    fn raxFreeWithCallback(rax: *mut rax, callback: rax_free_callback);
+    fn raxFreeWithCallback(rax: *mut rax, callback: RaxFreeCallback);
 
     fn raxInsert(rax: *mut rax,
                  s: *const u8,
@@ -1084,11 +909,9 @@ pub type RaxOp = *const u8;
 
 #[cfg(test)]
 mod tests {
-    use key;
     use rax::*;
     use sds;
     use std;
-    use std::collections;
     use test::Bencher;
     use stopwatch::Stopwatch;
 
@@ -1112,15 +935,15 @@ mod tests {
     }
 
     #[bench]
-    fn bench_fib(b: &mut Bencher) {
-        let mut r = &mut Rax::<u64, &str>::new();
+    fn bench_fib(_b: &mut Bencher) {
+        let r = &mut Rax::<u64, &str>::new();
         for x in 0..2000 {
-            r.insert_null(x);
+            r.insert_null(x).expect("whoops!");
         }
 
         let sw = Stopwatch::start_new();
 
-        for po in 0..1000000 {
+        for _po in 0..1000000 {
             r.find(300);
         }
 
@@ -1129,8 +952,8 @@ mod tests {
 
     #[test]
     fn bench_tree() {
-        for ii in 0..10 {
-            let mut r = &mut std::collections::BTreeMap::<u64, &str>::new();
+        for _ in 0..10 {
+            let r = &mut std::collections::BTreeMap::<u64, &str>::new();
             for x in 0..2000 {
                 r.insert(x, "");
             }
@@ -1138,7 +961,7 @@ mod tests {
             let sw = Stopwatch::start_new();
 
             let xx = 300;
-            for po in 0..1000000 {
+            for _po in 0..1000000 {
                 r.get(&xx);
             }
 
@@ -1148,10 +971,10 @@ mod tests {
 
     #[test]
     fn bench_rax_find() {
-        for ii in 0..10 {
-            let mut r = &mut Rax::<u64, &str>::new();
+        for _ in 0..10 {
+            let r = &mut Rax::<u64, &str>::new();
             for x in 0..2000 {
-                r.insert_null(x);
+                r.insert_null(x).expect("whoops!");
             }
 
             match r.find(1601) {
@@ -1161,7 +984,7 @@ mod tests {
 
             let sw = Stopwatch::start_new();
 
-            for po in 0..1000000 {
+            for _po in 0..1000000 {
                 r.find(1601);
             }
 
@@ -1171,8 +994,8 @@ mod tests {
 
     #[test]
     fn bench_hash_find() {
-        for ii in 0..10 {
-            let mut r = &mut std::collections::HashMap::<u64, &str>::new();
+        for _ in 0..10 {
+            let r = &mut std::collections::HashMap::<u64, &str>::new();
 //            r.insert_null(300);
             for x in 0..2000 {
                 r.insert(x, "");
@@ -1181,7 +1004,7 @@ mod tests {
             let sw = Stopwatch::start_new();
 
             let xx = 300;
-            for po in 0..1000000 {
+            for _po in 0..1000000 {
                 r.get(&xx);
             }
 
@@ -1191,13 +1014,13 @@ mod tests {
 
     #[test]
     fn bench_rax_insert() {
-        for ii in 0..10 {
+        for _ in 0..10 {
             let mut r = &mut Rax::<u64, &str>::new();
 //
             let sw = Stopwatch::start_new();
 
             for x in 0..1000000 {
-                r.insert(x, Box::new(""));
+                r.insert(x, Box::new("")).expect("whoops!");
             }
 
             println!("Thing took {}ms", sw.elapsed_ms());
@@ -1207,12 +1030,12 @@ mod tests {
 
     #[test]
     fn bench_rax_insert_show() {
-        let mut r = &mut Rax::<u64, &str>::new();
+        let r = &mut Rax::<u64, &str>::new();
 //
         let sw = Stopwatch::start_new();
 
         for x in 0..1000 {
-            r.insert(x, Box::new(""));
+            r.insert(x, Box::new("")).expect("whoops!");
         }
 
         r.show();
@@ -1222,17 +1045,17 @@ mod tests {
 
     #[test]
     fn bench_rax_replace() {
-        for ii in 0..10 {
+        for _ in 0..10 {
             let mut r = &mut Rax::<u64, &str>::new();
 
             for x in 0..1000000 {
-                r.insert(x, Box::new(""));
+                r.insert(x, Box::new("")).expect("whoops!");
             }
 //
             let sw = Stopwatch::start_new();
 
             for x in 0..1000000 {
-                r.insert(x, Box::new(""));
+                r.insert(x, Box::new("")).expect("whoops!");
             }
 
             println!("Thing took {}ms", sw.elapsed_ms());
@@ -1242,7 +1065,7 @@ mod tests {
 
     #[test]
     fn bench_tree_insert() {
-        for ii in 0..10 {
+        for _ in 0..10 {
             let mut r = &mut std::collections::BTreeMap::<u64, &str>::new();
 //
             let sw = Stopwatch::start_new();
@@ -1257,7 +1080,7 @@ mod tests {
 
     #[test]
     fn bench_hashmap_insert() {
-        for ii in 0..10 {
+        for _ in 0..10 {
             let mut r = &mut std::collections::HashMap::<u64, &str>::new();
 //
             let sw = Stopwatch::start_new();
@@ -1274,27 +1097,26 @@ mod tests {
     #[test]
     fn key_str() {
         let mut r = Rax::<&str, MyMsg>::new();
-        let mut z: u64 = 1;
 
         let key = "hello-way";
 
         r.insert(
             key,
             Box::new(MyMsg("world 80")),
-        );
+        ).expect("whoops!");
         r.insert(
             "hello-war",
             Box::new(MyMsg("world 80")),
-        );
+        ).expect("whoops!");
 
         r.insert(
             "hello-wares",
             Box::new(MyMsg("world 80")),
-        );
+        ).expect("whoops!");
         r.insert(
             "hello",
             Box::new(MyMsg("world 100")),
-        );
+        ).expect("whoops!");
 
         {
             match r.find("hello") {
@@ -1320,25 +1142,23 @@ mod tests {
         println!("sizeof(Rax) {}", std::mem::size_of::<Rax<f64, MyMsg>>());
 
         let mut r = Rax::<f64, MyMsg>::new();
-        let mut z: u64 = 1;
-
 
         r.insert(
             100.01,
             Box::new(MyMsg("world 100")),
-        );
+        ).expect("whoops!");
         r.insert(
             80.20,
             Box::new(MyMsg("world 80")),
-        );
+        ).expect("whoops!");
         r.insert(
             100.00,
             Box::new(MyMsg("world 200")),
-        );
+        ).expect("whoops!");
         r.insert(
             99.10,
             Box::new(MyMsg("world 1")),
-        );
+        ).expect("whoops!");
 
         r.show();
 
@@ -1357,25 +1177,23 @@ mod tests {
         println!("sizeof(Rax) {}", std::mem::size_of::<Rax<u64, MyMsg>>());
 
         let mut r = Rax::<u64, MyMsg>::new();
-        let mut z: u64 = 1;
-
 
         r.insert(
             100,
             Box::new(MyMsg("world 100")),
-        );
+        ).expect("whoops!");
         r.insert(
             80,
             Box::new(MyMsg("world 80")),
-        );
+        ).expect("whoops!");
         r.insert(
             200,
             Box::new(MyMsg("world 200")),
-        );
+        ).expect("whoops!");
         r.insert(
             1,
             Box::new(MyMsg("world 1")),
-        );
+        ).expect("whoops!");
 
         r.show();
 
@@ -1396,7 +1214,7 @@ mod tests {
         r.insert(
             sds::SDS::new("hello"),
             Box::new(MyMsg("world x10")),
-        );
+        ).expect("whoops!");
 
         match r.find(sds::SDS::new("hi")) {
             Some(v) => {
@@ -1421,19 +1239,19 @@ mod tests {
         r.insert(
             sds::SDS::new("hello"),
             Box::new(MyMsg("world x10")),
-        );
+        ).expect("whoops!");
         r.insert(
             sds::SDS::new("hello-16"),
             Box::new(MyMsg("world x11")),
-        );
+        ).expect("whoops!");
         r.insert(
             sds::SDS::new("hello-20"),
             Box::new(MyMsg("world x12")),
-        );
+        ).expect("whoops!");
         r.insert(
             sds::SDS::new("hello-01"),
             Box::new(MyMsg("world x13")),
-        );
+        ).expect("whoops!");
 
         r.show();
 
@@ -1445,160 +1263,5 @@ mod tests {
         while r.prev() {
             println!("{}", r.key());
         }
-    }
-
-    #[test]
-    fn it_works_2() {
-        let mut r: ::rax::RawRax<MyMsg> = RawRax::new();
-        let mut r2: ::rax::RawRax<i32> = RawRax::new();
-
-        r2.insert("1".as_ref(), Box::new(1));
-//        let mut map = collections::HashMap::new();
-//        map.insert("hi", Box::new(MyMsg("world 2")));
-
-        match r.insert("hi".as_ref(), Box::new(MyMsg("world 1"))) {
-            Ok((result, previous)) => {
-                match previous {
-                    Some(value) => {
-                        println!("PREV -> {}", value.0)
-                    }
-                    None => {
-                        println!("New Record!!!")
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        match r.find("hi".as_ref()) {
-            Some(v) => {
-                println!("Found: {}", v.0);
-            }
-            None => {
-                println!("Not Found");
-            }
-        };
-
-        match r.find("hi".as_ref()) {
-            Some(v) => {
-                println!("Found: {}", v.0);
-            }
-            None => {
-                println!("Not Found");
-            }
-        };
-
-        match r.insert("hippies".as_ref(), Box::new(MyMsg("world 2"))) {
-            Ok((result, previous)) => {
-                match previous {
-                    Some(value) => {
-                        println!("PREV -> {}", value.0)
-                    }
-                    None => {
-                        println!("New Record!!!")
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        match r.insert("hill".as_ref(), Box::new(MyMsg("world 3"))) {
-            Ok((result, previous)) => {
-                match previous {
-                    Some(value) => {
-                        println!("PREV -> {}", value.0)
-                    }
-                    None => {
-                        println!("New Record!!!")
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        match r.insert("hi".as_ref(), Box::new(MyMsg("world 4"))) {
-            Ok((result, previous)) => {
-                match previous {
-                    Some(value) => {
-                        println!("PREV -> {}", value.0)
-                    }
-                    None => {
-                        println!("New Record!!!")
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        match r.insert("hit".as_ref(), Box::new(MyMsg("world 5"))) {
-            Ok((result, previous)) => {
-                match previous {
-                    Some(value) => {
-                        println!("PREV -> {}", value.0)
-                    }
-                    None => {
-                        println!("New Record!!!")
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        r.show();
-
-        println!("First: {}", r.first());
-        while r.next() {
-            match r.data() {
-                Some(v) => {
-                    println!("next() -> {} - {}", std::str::from_utf8(r.key()).unwrap(), v.0);
-                }
-                None => {
-                    println!("NO DATA!!!");
-                }
-            }
-        }
-
-        r.last();
-        println!("now in reverse...");
-        while r.prev() {
-            match r.data() {
-                Some(v) => {
-                    println!("prev() -> {} - {}", std::str::from_utf8(r.key()).unwrap(), v.0);
-                }
-                None => {
-                    println!("NO DATA!!!");
-                }
-            }
-        }
-        r.last();
-        println!("now in reverse...");
-        while r.prev() {
-            match r.data() {
-                Some(v) => {
-                    println!("prev() -> {} - {}", std::str::from_utf8(r.key()).unwrap(), v.0);
-                }
-                None => {
-                    println!("NO DATA!!!");
-                }
-            }
-        }
-
-        let (exists, value) = r.find_exists("h".as_ref());
-        if !exists {
-            println!("NOT EXISTS!!!");
-        }
-
-        match r.find("h".as_ref()) {
-            Some(v) => {
-                println!("Found: {}", v.0);
-            }
-            None => {
-                println!("Not Found");
-            }
-        };
-        println!("finished iterator");
-
-//std::slice::from_raw_parts()
-//        r.insert("hidfdsafsdafsaddaeewwefewfwe", &mut MyMsg("world"));
     }
 }

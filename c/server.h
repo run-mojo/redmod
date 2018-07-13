@@ -16,7 +16,7 @@
 #include <pthread.h>
 #include <syslog.h>
 #include <netinet/in.h>
-#include <lua.h>
+//#include <lua.h>
 #include <signal.h>
 #include <sys/time.h>
 
@@ -472,5 +472,7 @@ typedef long long mstime_t; /* millisecond time type. */
 mstime_t mstime(void) {
     return ustime() / 1000;
 }
+
+void serverLog(int level, const char *fmt, ...);
 
 #endif //SLICED_SERVER_H

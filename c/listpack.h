@@ -58,4 +58,7 @@ unsigned char *lpPrev(unsigned char *lp, unsigned char *p);
 uint32_t lpBytes(unsigned char *lp);
 unsigned char *lpSeek(unsigned char *lp, long index);
 
+unsigned char *lpAppendInteger(unsigned char *lp, int64_t value);
+unsigned char *lpReplaceInteger(unsigned char *lp, unsigned char **pos, int64_t value);
+
 #endif

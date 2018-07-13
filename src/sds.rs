@@ -60,7 +60,7 @@ impl Ord for SDS {
 
 impl fmt::Display for SDS {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        f.write_str(self.to_str());
+        f.write_str(self.to_str()).expect("");
         Ok(())
     }
 }
@@ -485,7 +485,6 @@ mod tests {
     fn test_len() {
         println!("{}", std::mem::size_of::<sds::SDS>());
         println!("{}", std::mem::size_of::<sds::Sds>());
-        let mut s = sds::new_len("hello");
 
         let mut ss = sds::SDS::new("hello");
 

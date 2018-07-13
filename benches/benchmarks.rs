@@ -3,9 +3,8 @@ extern crate criterion;
 extern crate red_mod;
 
 use criterion::Criterion;
-use red_mod::rax::*;
 
-fn criterion_benchmark(c: &mut Criterion) {
+fn criterion_benchmark(_: &mut Criterion) {
 //    c.bench_function("hash", move |b| {
 //        // This will avoid timing the to_vec call.
 //        b.iter_with_setup(|| std::collections::HashMap::<u64, &str>::new(), |mut data| hash_insert(data))

@@ -1,9 +1,9 @@
-use libc;
 use rax::*;
 use std;
-use listpack::Listpack;
 use sds::SDS;
-use arrayvec::ArrayVec;
+//use std::mem::size_of;
+
+use stream::*;
 
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024 * 8;
 const DEFAULT_CHUNKS_PER_FILE: u64 = 8;
@@ -17,10 +17,8 @@ pub struct Config {
     pub page_size: u32,
     /// Max amount of memory to keep in the head list
     pub head_memory_limit: u64,
-}
-
-pub enum Jobs {
-    Dedupe
+    pub node_max_bytes: u32,
+    pub node_max_entries: u16,
 }
 
 /// Active job structure
@@ -30,7 +28,6 @@ pub struct Job {
 
     // Support upto 48 byte dedupe keys
     dup_len: u8,
-//    dup: [u8; 48],
 }
 
 impl Drop for Job {
@@ -39,35 +36,29 @@ impl Drop for Job {
     }
 }
 
-#[repr(C)]
-pub struct StreamID {
-    pub ms: libc::uint64_t,
-    pub seq: libc::uint64_t,
-}
-
 pub enum ChunkState {
     Idle,
     Loading,
     Error,
 }
 
-pub struct File {
+pub struct JobsFile {
     pub first: StreamID,
     pub last: StreamID,
     //
-    pub list: ArrayVec<Chunk>,
+    pub list: Vec<JobsChunk>,
 }
 
 ///
 #[repr(packed)]
-pub struct Chunk {
+pub struct JobsChunk {
     pub first: StreamID,
     pub last: StreamID,
     ///
     pub state: ChunkState,
 
     ///
-    pub list: Box<RawRax<Job>>,
+    pub list: Box<Rax<StreamID, Job>>,
 }
 
 pub enum Task {
@@ -81,14 +72,15 @@ pub struct Consumer;
 /// This is the core Redis Data Type.
 pub struct JobStream {
     flags: u32,
+    stream: *mut stream,
     /// Chunk of jobs to be consumed
-    head: Box<Chunk>,
+    head: Box<JobsChunk>,
     /// Pending Chunks
-    queue: std::collections::VecDeque<Box<Chunk>>,
+    queue: std::collections::VecDeque<Box<JobsChunk>>,
     /// Chunk
-    tail: Box<Chunk>,
+    tail: Box<JobsChunk>,
     /// Radix tree of all chunks.
-    chunks: Box<RawRax<Chunk>>,
+    chunks: Box<Rax<StreamID, JobsChunk>>,
     /// De-duplication RAX
     dup: Option<Box<Rax<SDS, Job>>>,
     /// Current configuration to control the behavior and memory consumption.
@@ -100,6 +92,17 @@ pub struct JobStream {
 impl JobStream {
     fn tick(&mut self) {
         // Perform cleanup and timeouts
+        // Iterate all consumer groups
+        // Find min ID - First entry on group PEL
+        // Fax max ID -
+    }
+
+    fn add(&mut self) {
+
+    }
+
+    fn add_to_dedupe(&mut self) {
+
     }
 
     fn remove_job(&mut self) {}
@@ -113,6 +116,6 @@ mod tests {
     #[test]
     fn test_packing() {
         println!("sizeof<Job> =         {}", std::mem::size_of::<Job>());
-        println!("sizeof<StreamID> =    {}", std::mem::size_of::<StreamID>());
+//        println!("sizeof<StreamID> =    {}", std::mem::size_of::<StreamID>());
     }
 }

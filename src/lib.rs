@@ -13,8 +13,8 @@ extern crate stopwatch;
 #[macro_use]
 extern crate bitflags;
 
-#[macro_use]
-extern crate arrayvec;
+//#[macro_use]
+//extern crate arrayvec;
 //extern crate dlopen;
 //#[macro_use]
 //extern crate dlopen_derive;
