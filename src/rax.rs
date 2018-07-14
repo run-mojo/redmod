@@ -2,43 +2,37 @@ use error::RedError;
 use libc;
 use sds::SDS;
 use std;
+use std::mem::{size_of, transmute};
 use std::ptr;
-use std::mem::{transmute, size_of};
+
+pub const GREATER: &'static str = ">";
+pub const GREATER_EQUAL: &'static str = ">=";
+pub const LESSER: &'static str = "<";
+pub const LESSER_EQUAL: &'static str = "<=";
+pub const EQUAL: &'static str = "=";
+pub const BEGIN: &'static str = "^";
+pub const END: &'static str = "$";
+
+pub const RAX_NODE_MAX_SIZE: libc::c_int = ((1 << 29) - 1);
+pub const RAX_STACK_STATIC_ITEMS: libc::c_int = 128;
+pub const RAX_ITER_STATIC_LEN: libc::c_int = 128;
+pub const RAX_ITER_JUST_SEEKED: libc::c_int = (1 << 0);
+pub const RAX_ITER_EOF: libc::c_int = (1 << 1);
+pub const RAX_ITER_SAFE: libc::c_int = (1 << 2);
 
 /// Redis has a beautiful Radix Tree implementation in ANSI C.
-/// This brings it to Rust. Great effort went into trying this zero overhead.
+/// This brings it to Rust. Great effort went into this being zero overhead.
 /// If you catch something that could be better go ahead and share it.
-pub trait RAX<K: RaxKey, V> {
-    fn show(&self);
-
-    fn find(&self, key: K) -> Option<&V>;
-
-    fn insert(&mut self, key: K, data: Box<V>) -> Result<(i32, Option<Box<V>>), RedError>;
-
-    fn remove(&mut self, key: K) -> (bool, Option<Box<V>>);
-}
-
-pub trait RAXIter<K: RaxKey, V>: RAX<K, V> {}
-
-
-#[derive(Clone)]
-pub struct Rax<K: RaxKey, V> {
+pub struct RaxMap<K: RaxKey, V> {
     pub rax: *mut rax,
-    /// Having more than one iterator per Rax is pretty uncommon.
-    /// We'll go ahead and keep a lot open for a pointer to one that
-    /// whose lifespan will equal the associated rax.
-    pub it: *mut raxIterator,
     phantom: std::marker::PhantomData<(K, V)>,
 }
 
-impl<K: RaxKey, V> Rax<K, V> {
-    pub fn new() -> Rax<K, V> {
+impl<K: RaxKey, V> RaxMap<K, V> {
+    pub fn new() -> RaxMap<K, V> {
         unsafe {
-            let r = raxNew();
-            Rax {
-                rax: r,
-//                it: std::ptr::null_mut(),
-                it: raxIteratorNew(r),
+            RaxMap {
+                rax: raxNew(),
                 phantom: std::marker::PhantomData,
             }
         }
@@ -68,8 +62,8 @@ impl<K: RaxKey, V> Rax<K, V> {
             // Integer values require Big Endian to allow the Rax to fully optimize
             // storing them since it will be able to compress the prefixes especially
             // for 64/128bit numbers.
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let r = raxInsert(
                 self.rax,
@@ -111,8 +105,8 @@ impl<K: RaxKey, V> Rax<K, V> {
             // Integer values require Big Endian to allow the Rax to fully optimize
             // storing them since it will be able to compress the prefixes especially
             // for 64/128bit numbers.
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let r = raxInsert(
                 self.rax,
@@ -144,8 +138,8 @@ impl<K: RaxKey, V> Rax<K, V> {
     pub fn remove(&mut self, key: K) -> (bool, Option<Box<V>>) {
         unsafe {
             let old: &mut *mut u8 = &mut ptr::null_mut();
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let r = raxRemove(
                 self.rax,
@@ -167,8 +161,8 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn find_exists(&self, key: K) -> (bool, Option<&V>) {
         unsafe {
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let value = raxFind(
                 self.rax,
@@ -194,8 +188,8 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn find(&self, key: K) -> Option<&V> {
         unsafe {
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let value = raxFind(
                 self.rax,
@@ -219,8 +213,8 @@ impl<K: RaxKey, V> Rax<K, V> {
     ///
     pub fn exists(&self, key: K) -> bool {
         unsafe {
-            let k = key.for_encoding();
-            let (ptr, len) = k.encode();
+            let k = key.encode();
+            let (ptr, len) = k.to_buf();
 
             let value = raxFind(
                 self.rax,
@@ -237,127 +231,214 @@ impl<K: RaxKey, V> Rax<K, V> {
     }
 
     ///
-    ///
-    ///
-    pub fn iterator(&self) -> RaxIterator<V> {
+    #[inline]
+    pub fn seek_min<F>(
+        &mut self,
+        f: F,
+    ) where
+        F: Fn(
+            &mut RaxMap<K, V>,
+            &mut RaxCursor<K, V>,
+        ) {
         unsafe {
-            RaxIterator {
-                it: raxIteratorNew(self.rax),
-                marker: std::marker::PhantomData,
-            }
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek_min();
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn first(&self) -> bool {
+    #[inline]
+    pub fn seek_min_result<R, F>(
+        &mut self,
+        op: &str,
+        key: K,
+        f: F,
+    ) -> Result<R, RedError>
+        where
+            F: Fn(
+                &mut RaxMap<K, V>,
+                &mut RaxCursor<K, V>,
+            ) -> Result<R, RedError> {
         unsafe {
-            raxSeek(self.it, RAX_MIN, ptr::null(), 0) == 1
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek_min();
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn last(&self) -> bool {
+    #[inline]
+    pub fn seek_max<F>(
+        &mut self,
+        f: F,
+    ) where
+        F: Fn(
+            &mut RaxMap<K, V>,
+            &mut RaxCursor<K, V>,
+        ) {
         unsafe {
-            raxSeek(self.it, RAX_MAX, ptr::null(), 0) == 1
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek_max();
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn prev(&self) -> bool {
+    #[inline]
+    pub fn seek_max_result<R, F>(
+        &mut self,
+        op: &str,
+        key: K,
+        f: F,
+    ) -> Result<R, RedError>
+        where
+            F: Fn(
+                &mut RaxMap<K, V>,
+                &mut RaxCursor<K, V>,
+            ) -> Result<R, RedError> {
         unsafe {
-            raxPrev(self.it) == 1
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek_max();
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn next(&self) -> bool {
+    #[inline]
+    pub fn seek<F>(
+        &mut self,
+        op: &str,
+        key: K,
+        f: F,
+    ) where
+        F: Fn(
+            &mut RaxMap<K, V>,
+            &mut RaxCursor<K, V>,
+        ) {
         unsafe {
-            raxNext(self.it) == 1
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek(op, key);
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn key(&self) -> K {
-        unsafe { K::decode((*self.it).key, (*self.it).key_len as usize) }
-    }
-
-    ///
-    ///
-    ///
-    pub fn key_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts((*self.it).key, (*self.it).key_len as usize) }
-    }
-
-    ///
-    ///
-    ///
-    pub fn key_ptr(&self) -> (*const u8, usize) {
+    #[inline]
+    pub fn seek_result<R, F>(
+        &mut self,
+        op: &str,
+        key: K,
+        f: F,
+    ) -> Result<R, RedError>
+        where
+            F: Fn(
+                &mut RaxMap<K, V>,
+                &mut RaxCursor<K, V>,
+            ) -> Result<R, RedError> {
         unsafe {
-            if self.it.is_null() {
-                (ptr::null(), 0)
-            } else {
-                ((*self.it).key as *const u8, (*self.it).key_len)
-            }
+            // Allocate stack memory.
+            let mut cursor: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&cursor as *const _ as *const raxIterator, self.rax);
+            cursor.seek(op, key);
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut cursor)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn key_mut_ptr(&self) -> (*mut u8, usize) {
+    #[inline]
+    pub fn iter<F>(&mut self, f: F) where F: Fn(&mut RaxMap<K, V>, &mut RaxCursor<K, V>) {
         unsafe {
-            if self.it.is_null() {
-                (std::ptr::null_mut(), 0)
-            } else {
-                ((*self.it).key, (*self.it).key_len)
-            }
+            // Allocate stack memory.
+            let mut i: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&i as *const _ as *const raxIterator, self.rax);
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut i)
         }
     }
 
     ///
-    ///
-    ///
-    pub fn data(&self) -> Option<&V> {
+    #[inline]
+    pub fn iter_result<F, R>(
+        &mut self, f: F,
+    ) -> Result<R, RedError>
+        where
+            F: Fn(&mut RaxMap<K, V>, &mut RaxCursor<K, V>) -> Result<R, RedError> {
         unsafe {
-            let data: *mut libc::c_void = (*self.it).data;
-            if data.is_null() {
-                None
-            } else {
-                Some(std::mem::transmute(data as *mut u8))
-            }
+            // Allocate stack memory.
+            let mut i: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&i as *const _ as *const raxIterator, self.rax);
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut i)
         }
     }
 
-    pub fn seek(&self, op: *const u8, ele: &[u8]) -> bool {
+    ///
+    #[inline]
+    pub fn iter_apply<F, R>(
+        &mut self, f: F,
+    ) -> Result<R, RedError>
+        where
+            F: Fn(&mut RaxMap<K, V>, &mut RaxCursor<K, V>) -> Result<R, RedError> {
         unsafe {
-            raxSeek(self.it, op, ele.as_ptr(), ele.len() as libc::size_t) == 1
+            // Allocate stack memory.
+            let mut i: RaxCursor<K, V> = std::mem::uninitialized();
+            // Initialize a Rax iterator. This call should be performed a single time
+            // to initialize the iterator, and must be followed by a raxSeek() call,
+            // otherwise the raxPrev()/raxNext() functions will just return EOF.
+            raxStart(&i as *const _ as *const raxIterator, self.rax);
+            // Borrow stack iterator and execute the closure.
+            f(self, &mut i)
         }
     }
 }
 
 //
-impl<K: RaxKey, V> Drop for Rax<K, V> {
+impl<K: RaxKey, V> Drop for RaxMap<K, V> {
     fn drop(&mut self) {
         unsafe {
             // Cleanup RAX
-            raxFreeWithCallback(self.rax, rax_free_with_callback_wrapper::<V>);
-
-            // Cleanup iterator.
-            if !self.it.is_null() {
-                raxStop(self.it);
-                raxIteratorFree(self.it);
-                self.it = std::ptr::null_mut();
-            }
+            raxFreeWithCallback(self.rax, RaxFreeWithCallbackWrapper::<V>);
         }
     }
 }
@@ -365,32 +446,32 @@ impl<K: RaxKey, V> Drop for Rax<K, V> {
 pub trait RaxKey<RHS = Self>: Clone + Default + std::fmt::Debug {
     type Output: RaxKey;
 
-    fn for_encoding(self) -> Self::Output;
+    fn encode(self) -> Self::Output;
 
-    fn encode(&self) -> (*const u8, usize);
+    fn to_buf(&self) -> (*const u8, usize);
 
-    fn decode(ptr: *const u8, len: usize) -> RHS;
+    fn from_buf(ptr: *const u8, len: usize) -> RHS;
 }
 
 impl RaxKey for f32 {
     type Output = u32;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         // Encode as u32 Big Endian
         self.to_bits().to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         // This should never get called since we represent as a u32
         (self as *const _ as *const u8, std::mem::size_of::<f32>())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> f32 {
+    fn from_buf(ptr: *const u8, len: usize) -> f32 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe {
             // We used a BigEndian u32 to encode so let's reverse it
@@ -407,21 +488,21 @@ impl RaxKey for f64 {
     type Output = u64;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         // Encode as u64 Big Endian
         self.to_bits().to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         // This should never get called since we represent as a u64
         (self as *const _ as *const u8, size_of::<f64>())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> f64 {
+    fn from_buf(ptr: *const u8, len: usize) -> f64 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe {
             // We used a BigEndian u64 to encode so let's reverse it
@@ -438,19 +519,19 @@ impl RaxKey for isize {
     type Output = isize;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, size_of::<isize>())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> isize {
+    fn from_buf(ptr: *const u8, len: usize) -> isize {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { isize::from_be(*(ptr as *mut [u8; size_of::<isize>()] as *mut isize)) }
     }
@@ -460,19 +541,19 @@ impl RaxKey for usize {
     type Output = usize;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, std::mem::size_of::<usize>())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> usize {
+    fn from_buf(ptr: *const u8, len: usize) -> usize {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { usize::from_be(*(ptr as *mut [u8; std::mem::size_of::<usize>()] as *mut usize)) }
     }
@@ -482,19 +563,19 @@ impl RaxKey for i16 {
     type Output = i16;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 2)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> i16 {
+    fn from_buf(ptr: *const u8, len: usize) -> i16 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { i16::from_be(*(ptr as *mut [u8; 2] as *mut i16)) }
     }
@@ -504,19 +585,19 @@ impl RaxKey for u16 {
     type Output = u16;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 2)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> u16 {
+    fn from_buf(ptr: *const u8, len: usize) -> u16 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { u16::from_be(*(ptr as *mut [u8; 2] as *mut u16)) }
     }
@@ -526,19 +607,19 @@ impl RaxKey for i32 {
     type Output = i32;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 4)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> i32 {
+    fn from_buf(ptr: *const u8, len: usize) -> i32 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { i32::from_be(*(ptr as *mut [u8; 4] as *mut i32)) }
     }
@@ -548,19 +629,19 @@ impl RaxKey for u32 {
     type Output = u32;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 4)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> u32 {
+    fn from_buf(ptr: *const u8, len: usize) -> u32 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { u32::from_be(*(ptr as *mut [u8; 4] as *mut u32)) }
     }
@@ -570,19 +651,19 @@ impl RaxKey for i64 {
     type Output = i64;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 8)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> i64 {
+    fn from_buf(ptr: *const u8, len: usize) -> i64 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { i64::from_be(*(ptr as *mut [u8; 8] as *mut i64)) }
     }
@@ -592,19 +673,19 @@ impl RaxKey for u64 {
     type Output = u64;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 8)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> u64 {
+    fn from_buf(ptr: *const u8, len: usize) -> u64 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { u64::from_be(*(ptr as *mut [u8; 8] as *mut u64)) }
     }
@@ -614,19 +695,19 @@ impl RaxKey for i128 {
     type Output = i128;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 16)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> i128 {
+    fn from_buf(ptr: *const u8, len: usize) -> i128 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { i128::from_be(*(ptr as *mut [u8; 16] as *mut i128)) }
     }
@@ -636,19 +717,19 @@ impl RaxKey for u128 {
     type Output = u128;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self.to_be()
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self as *const _ as *const u8, 16)
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> u128 {
+    fn from_buf(ptr: *const u8, len: usize) -> u128 {
         if len != size_of::<Self>() {
-            return Self::default()
+            return Self::default();
         }
         unsafe { u128::from_be(*(ptr as *mut [u8; 16] as *mut u128)) }
     }
@@ -658,17 +739,17 @@ impl RaxKey for SDS {
     type Output = SDS;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         (self.as_ptr(), self.len())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> SDS {
+    fn from_buf(ptr: *const u8, len: usize) -> SDS {
         SDS::from_ptr(ptr, len)
     }
 }
@@ -677,17 +758,17 @@ impl<'a> RaxKey for &'a str {
     type Output = &'a str;
 
     #[inline]
-    fn for_encoding(self) -> Self::Output {
+    fn encode(self) -> Self::Output {
         self
     }
 
     #[inline]
-    fn encode(&self) -> (*const u8, usize) {
+    fn to_buf(&self) -> (*const u8, usize) {
         ((*self).as_ptr(), self.len())
     }
 
     #[inline]
-    fn decode(ptr: *const u8, len: usize) -> &'a str {
+    fn from_buf(ptr: *const u8, len: usize) -> &'a str {
         unsafe {
             std::str::from_utf8(
                 std::slice::from_raw_parts(ptr, len)
@@ -696,45 +777,185 @@ impl<'a> RaxKey for &'a str {
     }
 }
 
-pub struct RaxIterator<V> {
-    it: *mut raxIterator,
-    marker: std::marker::PhantomData<V>,
+#[repr(C)]
+pub struct RaxCursor<K: RaxKey, V> {
+    pub flags: libc::c_int,
+    pub rt: *mut rax,
+    pub key: *mut u8,
+    pub data: *mut libc::c_void,
+    pub key_len: libc::size_t,
+    pub key_max: libc::size_t,
+    pub key_static_string: [u8; 128],
+    pub node: *mut raxNode,
+    pub stack: raxStack,
+    pub node_cb: Option<raxNodeCallback>,
+    _marker: std::marker::PhantomData<(K, V)>,
 }
 
-impl<V> RaxIterator<V> {
-    pub fn new_heap_allocated() {}
-
-    pub fn first(&self) -> bool {
+impl<K: RaxKey, V> Drop for RaxCursor<K, V> {
+    fn drop(&mut self) {
         unsafe {
-            raxSeek(self.it, MIN.as_ptr(), std::ptr::null(), 0) == 1
+            raxStop(self as *const _ as *const raxIterator);
+        }
+    }
+}
+
+impl<K: RaxKey, V: 'static> Iterator for RaxCursor<K, V> {
+    type Item = (K, Option<&'static V>);
+
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        unsafe {
+            if raxNext(self as *const _ as *const raxIterator) == 1 {
+                let data: *mut libc::c_void = self.data;
+                if data.is_null() {
+                    None
+                } else {
+                    let val = data as *const V;
+                    if val.is_null() {
+                        Some((self.key(), None))
+                    } else {
+                        Some((self.key(), Some(std::mem::transmute(val as *mut u8))))
+                    }
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<K: RaxKey, V: 'static> DoubleEndedIterator for RaxCursor<K, V> {
+    fn next_back(&mut self) -> Option<<Self as Iterator>::Item> {
+        unsafe {
+            if raxPrev(self as *const _ as *const raxIterator) == 1 {
+                let data: *mut libc::c_void = self.data;
+                if data.is_null() {
+                    None
+                } else {
+                    let val = data as *const V;
+                    if val.is_null() {
+                        Some((self.key(), None))
+                    } else {
+                        Some((self.key(), Some(std::mem::transmute(val as *mut u8))))
+                    }
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<K: RaxKey, V> RaxCursor<K, V> {
+    pub fn new(r: RaxMap<K, V>) -> RaxCursor<K, V> {
+        unsafe {
+            let mut iter: RaxCursor<K, V> = std::mem::uninitialized();
+            raxStart(&mut iter as *mut _ as *mut raxIterator, r.rax);
+            iter
         }
     }
 
-    pub fn last(&self) -> bool {
+    pub fn print_ptr(&self) {
+        println!("ptr = {:p}", self);
+        println!("ptr = {:p}", self as *const _ as *const raxIterator);
+    }
+
+    #[inline]
+    pub fn begin(&self) -> bool {
         unsafe {
-            raxSeek(self.it, MAX.as_ptr(), std::ptr::null(), 0) == 1
+            raxSeek(
+                self as *const _ as *const raxIterator,
+                BEGIN.as_ptr(),
+                std::ptr::null(),
+                0,
+            ) == 1
         }
     }
 
-    pub fn prev(&self) -> bool {
+    #[inline]
+    pub fn seek_min(&self) -> bool {
         unsafe {
-            raxPrev(self.it) == 1
+            if raxSeek(
+                self as *const _ as *const raxIterator,
+                BEGIN.as_ptr(),
+                std::ptr::null(),
+                0,
+            ) == 1 {
+                self.forward()
+            } else {
+                false
+            }
         }
     }
 
-    pub fn next(&self) -> bool {
+    #[inline]
+    pub fn end(&self) -> bool {
         unsafe {
-            raxNext(self.it) == 1
+            raxSeek(
+                self as *const _ as *const raxIterator,
+                END.as_ptr(),
+                std::ptr::null(),
+                0,
+            ) == 1
         }
     }
 
-    pub fn key(&self) -> &[u8] {
-        "".as_ref()
+    #[inline]
+    pub fn seek_max(&self) -> bool {
+        unsafe {
+            if raxSeek(
+                self as *const _ as *const raxIterator,
+                END.as_ptr(),
+                std::ptr::null(),
+                0,
+            ) == 1 {
+                self.back()
+            } else {
+                false
+            }
+        }
     }
 
+    #[inline]
+    pub fn back(&self) -> bool {
+        unsafe {
+            raxPrev(self as *const _ as *const raxIterator) == 1
+        }
+    }
+
+    #[inline]
+    pub fn go_prev(&self) -> bool {
+        unsafe {
+            raxPrev(self as *const _ as *const raxIterator) == 1
+        }
+    }
+
+    #[inline]
+    pub fn forward(&self) -> bool {
+        unsafe {
+            raxNext(self as *const _ as *const raxIterator) == 1
+        }
+    }
+
+    #[inline]
+    pub fn go_next(&self) -> bool {
+        unsafe {
+            raxNext(self as *const _ as *const raxIterator) == 1
+        }
+    }
+
+    ///
+    ///
+    ///
+    #[inline]
+    pub fn key(&self) -> K {
+        unsafe { K::from_buf(self.key, self.key_len as usize) }
+    }
+
+    #[inline]
     pub fn data(&self) -> Option<&V> {
         unsafe {
-            let data: *mut libc::c_void = (*self.it).data;
+            let data: *mut libc::c_void = self.data;
             if data.is_null() {
                 None
             } else {
@@ -743,19 +964,63 @@ impl<V> RaxIterator<V> {
         }
     }
 
-    pub fn seek(&self, op: *const u8, ele: &[u8]) -> bool {
+    #[inline]
+    pub fn less_than(&self, key: K) -> bool {
+        self.seek(LESSER, key)
+    }
+
+    #[inline]
+    pub fn less_than_or_equal_to(&self, key: K) -> bool {
+        self.seek(LESSER_EQUAL, key)
+    }
+
+    #[inline]
+    pub fn greater_than(&self, key: K) -> bool {
+        self.seek(GREATER, key)
+    }
+
+    #[inline]
+    pub fn greater_than_or_equal_to(&self, key: K) -> bool {
+        self.seek(GREATER_EQUAL, key)
+    }
+
+    #[inline]
+    pub fn seek(&self, op: &str, key: K) -> bool {
         unsafe {
-            raxSeek(self.it, op, ele.as_ptr(), ele.len() as libc::size_t) == 1
+            let k = key.encode();
+            let (p, len) = k.to_buf();
+            raxSeek(
+                self as *const _ as *const raxIterator,
+                op.as_ptr(),
+                p,
+                len,
+            ) == 1 && self.flags & RAX_ITER_EOF != 0
         }
     }
-}
 
-impl<V> Drop for RaxIterator<V> {
-    fn drop(&mut self) {
+    #[inline]
+    pub fn seek_raw(&self, op: &str, key: K) -> i32 {
         unsafe {
-            raxStop(self.it);
-            raxIteratorFree(self.it);
+            let k = key.encode();
+            let (p, len) = k.to_buf();
+            raxSeek(self as *const _ as *const raxIterator, op.as_ptr(), p, len)
         }
+    }
+
+    #[inline]
+    pub fn seek_bytes(&self, op: &str, ele: &[u8]) -> bool {
+        unsafe {
+            raxSeek(self as *const _ as *const raxIterator, op.as_ptr(), ele.as_ptr(), ele.len() as libc::size_t) == 1
+        }
+    }
+
+    /// Return if the iterator is in an EOF state. This happens when raxSeek()
+    /// failed to seek an appropriate element, so that raxNext() or raxPrev()
+    /// will return zero, or when an EOF condition was reached while iterating
+    /// with next() and prev().
+    #[inline]
+    pub fn eof(&self) -> bool {
+        self.flags & RAX_ITER_EOF != 0
     }
 }
 
@@ -770,7 +1035,6 @@ pub struct raxNode;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-//pub struct raxStack;
 pub struct raxStack {
     stack: *mut *mut libc::c_void,
     items: libc::size_t,
@@ -779,38 +1043,12 @@ pub struct raxStack {
     oom: libc::c_int,
 }
 
-pub const GT: &'static str = ">";
-pub const GTE: &'static str = ">=";
-pub const LT: &'static str = "<";
-pub const LTE: &'static str = "<=";
-pub const EQ: &'static str = "=";
-pub const MIN: &'static str = "^";
-pub const MAX: &'static str = "$";
-
-pub const RAX_NODE_MAX_SIZE: libc::c_int = ((1 << 29) - 1);
-pub const RAX_STACK_STATIC_ITEMS: libc::c_int = 128;
-pub const RAX_ITER_STATIC_LEN: libc::c_int = 128;
-pub const RAX_ITER_JUST_SEEKED: libc::c_int = (1 << 0);
-pub const RAX_ITER_EOF: libc::c_int = (1 << 1);
-pub const RAX_ITER_SAFE: libc::c_int = (1 << 2);
-
-#[derive(Clone, Copy)]
 #[repr(C)]
-//pub struct raxIterator;
-pub struct raxIterator {
-    pub flags: libc::c_int,
-    pub rt: *mut rax,
-    pub key: *mut u8,
-    pub data: *mut libc::c_void,
-    pub key_len: libc::size_t,
-    pub key_max: libc::size_t,
-    pub key_static_string: [u8; 128],
-    pub node: *mut raxNode,
-    pub stack: raxStack,
-    pub node_cb: Option<raxNodeCallback>,
-}
+pub struct raxIterator;
 
-extern "C" fn rax_free_with_callback_wrapper<V>(v: *mut libc::c_void) {
+#[allow(non_snake_case)]
+#[allow(non_camel_case_types)]
+extern "C" fn RaxFreeWithCallbackWrapper<V>(v: *mut libc::c_void) {
     unsafe {
         // Re-box it so it can drop it immediately after it leaves this scope.
         Box::from_raw(v as *mut V);
@@ -829,79 +1067,127 @@ type RaxFreeCallback = extern "C" fn(v: *mut libc::c_void);
 #[link(name = "redismodule", kind = "static")]
 extern "C" {
     #[no_mangle]
-    pub static RAX_GREATER: *const u8; // '>'
-#[no_mangle]
-pub static RAX_GREATER_EQUAL: *const u8; // '>='
-#[no_mangle]
-pub static RAX_LESSER: *const u8; // '<'
-#[no_mangle]
-pub static RAX_LESSER_EQUAL: *const u8; // '<='
-#[no_mangle]
-pub static RAX_EQUAL: *const u8; // '='
-#[no_mangle]
-pub static RAX_MIN: *const u8; // '^'
-#[no_mangle]
-pub static RAX_MAX: *const u8; // '$'
-
-    #[no_mangle]
     pub static raxNotFound: *mut u8;
 
-    fn raxIteratorFree(it: *mut raxIterator);
+    // '>'
+    #[no_mangle]
+    pub static RAX_GREATER: *const u8;
+    // '>='
+    #[no_mangle]
+    pub static RAX_GREATER_EQUAL: *const u8;
+    // '<'
+    #[no_mangle]
+    pub static RAX_LESSER: *const u8;
+    // '<='
+    #[no_mangle]
+    pub static RAX_LESSER_EQUAL: *const u8;
+    // '='
+    #[no_mangle]
+    pub static RAX_EQUAL: *const u8;
+    // '^'
+    #[no_mangle]
+    pub static RAX_MIN: *const u8;
+    // '$'
+    #[no_mangle]
+    pub static RAX_MAX: *const u8;
+
+    fn raxIteratorFree(
+        it: *const raxIterator
+    );
 
     fn raxIteratorSize() -> libc::c_int;
 
     fn raxNew() -> *mut rax;
 
-    fn raxFree(rax: *mut rax);
+    fn raxFree(
+        rax: *mut rax
+    );
 
-    fn raxFreeWithCallback(rax: *mut rax, callback: RaxFreeCallback);
+    fn raxFreeWithCallback(
+        rax: *mut rax,
+        callback: RaxFreeCallback,
+    );
 
-    fn raxInsert(rax: *mut rax,
-                 s: *const u8,
-                 len: libc::size_t,
-                 data: *const u8,
-                 old: &mut *mut u8) -> libc::c_int;
+    fn raxInsert(
+        rax: *mut rax,
+        s: *const u8,
+        len: libc::size_t,
+        data: *const u8,
+        old: &mut *mut u8,
+    ) -> libc::c_int;
 
-    fn raxTryInsert(rax: *mut rax,
-                    s: *mut u8,
-                    len: libc::size_t,
-                    data: *mut libc::c_void,
-                    old: *mut *mut libc::c_void) -> libc::c_int;
+    fn raxTryInsert(
+        rax: *mut rax,
+        s: *mut u8,
+        len: libc::size_t,
+        data: *mut libc::c_void,
+        old: *mut *mut libc::c_void,
+    ) -> libc::c_int;
 
-    fn raxRemove(rax: *mut rax,
-                 s: *const u8,
-                 len: libc::size_t,
-                 old: &mut *mut u8) -> libc::c_int;
+    fn raxRemove(
+        rax: *mut rax,
+        s: *const u8,
+        len: libc::size_t,
+        old: &mut *mut u8,
+    ) -> libc::c_int;
 
-    fn raxFind(rax: *mut rax, s: *const u8, len: libc::size_t) -> *mut u8;
+    fn raxFind(
+        rax: *mut rax,
+        s: *const u8,
+        len: libc::size_t,
+    ) -> *mut u8;
 
-    fn raxIteratorNew(rt: *mut rax) -> *mut raxIterator;
+    fn raxIteratorNew(
+        rt: *mut rax
+    ) -> *mut raxIterator;
 
-    fn raxStart(it: *mut raxIterator, rt: *mut rax);
+    fn raxStart(
+        it: *const raxIterator,
+        rt: *mut rax,
+    );
 
-    fn raxSeek(it: *mut raxIterator,
-               op: *const u8,
-               ele: *const u8,
-               len: libc::size_t) -> libc::c_int;
+    fn raxSeek(
+        it: *const raxIterator,
+        op: *const u8,
+        ele: *const u8,
+        len: libc::size_t,
+    ) -> libc::c_int;
 
-    fn raxNext(it: *mut raxIterator) -> libc::c_int;
+    fn raxNext(
+        it: *const raxIterator
+    ) -> libc::c_int;
 
-    fn raxPrev(it: *mut raxIterator) -> libc::c_int;
+    fn raxPrev(
+        it: *const raxIterator
+    ) -> libc::c_int;
 
-    fn raxRandomWalk(it: *mut raxIterator, steps: libc::size_t) -> libc::c_int;
+    fn raxRandomWalk(
+        it: *const raxIterator,
+        steps: libc::size_t,
+    ) -> libc::c_int;
 
-    fn raxCompare(it: *mut raxIterator,
-                  op: *const u8,
-                  key: *mut u8,
-                  key_len: libc::size_t) -> libc::c_int;
+    fn raxCompare(
+        it: *const raxIterator,
+        op: *const u8,
+        key: *mut u8,
+        key_len: libc::size_t,
+    ) -> libc::c_int;
 
-    fn raxStop(it: *mut raxIterator);
+    fn raxStop(
+        it: *const raxIterator
+    );
 
-    fn raxEOF(it: *mut raxIterator) -> libc::c_int;
+    pub fn raxEOF(
+        it: *const raxIterator
+    ) -> libc::c_int;
 
-    fn raxShow(rax: *mut rax);
+    pub fn raxShow(
+        rax: *mut rax
+    );
 
-    fn raxSize(rax: *mut rax) -> libc::uint64_t;
+    fn raxSize(
+        rax: *mut rax
+    ) -> libc::uint64_t;
 }
 
 pub type RaxOp = *const u8;
@@ -912,8 +1198,8 @@ mod tests {
     use rax::*;
     use sds;
     use std;
-    use test::Bencher;
     use stopwatch::Stopwatch;
+    use test::Bencher;
 
     pub struct MyMsg<'a>(&'a str);
 
@@ -936,7 +1222,7 @@ mod tests {
 
     #[bench]
     fn bench_fib(_b: &mut Bencher) {
-        let r = &mut Rax::<u64, &str>::new();
+        let r = &mut RaxMap::<u64, &str>::new();
         for x in 0..2000 {
             r.insert_null(x).expect("whoops!");
         }
@@ -972,7 +1258,7 @@ mod tests {
     #[test]
     fn bench_rax_find() {
         for _ in 0..10 {
-            let r = &mut Rax::<u64, &str>::new();
+            let r = &mut RaxMap::<u64, &str>::new();
             for x in 0..2000 {
                 r.insert_null(x).expect("whoops!");
             }
@@ -986,6 +1272,32 @@ mod tests {
 
             for _po in 0..1000000 {
                 r.find(1601);
+            }
+
+            println!("Thing took {}ms", sw.elapsed_ms());
+        }
+    }
+
+    #[test]
+    fn bench_rax_iter_find() {
+        for _ in 0..10 {
+            let r = &mut RaxMap::<u64, &str>::new();
+            for x in 0..2000 {
+                r.insert_null(x).expect("whoops!");
+            }
+
+            match r.find(1601) {
+                Some(v) => println!("{}", v),
+                None => {}
+            }
+
+            let sw = Stopwatch::start_new();
+
+            for _po in 0..1000000 {
+                r.iter(|_, iter| {
+                    iter.seek(EQUAL, 1601);
+
+                });
             }
 
             println!("Thing took {}ms", sw.elapsed_ms());
@@ -1015,7 +1327,7 @@ mod tests {
     #[test]
     fn bench_rax_insert() {
         for _ in 0..10 {
-            let mut r = &mut Rax::<u64, &str>::new();
+            let mut r = &mut RaxMap::<u64, &str>::new();
 //
             let sw = Stopwatch::start_new();
 
@@ -1030,7 +1342,7 @@ mod tests {
 
     #[test]
     fn bench_rax_insert_show() {
-        let r = &mut Rax::<u64, &str>::new();
+        let r = &mut RaxMap::<u64, &str>::new();
 //
         let sw = Stopwatch::start_new();
 
@@ -1046,7 +1358,7 @@ mod tests {
     #[test]
     fn bench_rax_replace() {
         for _ in 0..10 {
-            let mut r = &mut Rax::<u64, &str>::new();
+            let mut r = &mut RaxMap::<u64, &str>::new();
 
             for x in 0..1000000 {
                 r.insert(x, Box::new("")).expect("whoops!");
@@ -1096,7 +1408,7 @@ mod tests {
 
     #[test]
     fn key_str() {
-        let mut r = Rax::<&str, MyMsg>::new();
+        let mut r = RaxMap::<&str, MyMsg>::new();
 
         let key = "hello-way";
 
@@ -1127,21 +1439,23 @@ mod tests {
 
         r.show();
 
-        r.first();
-        while r.next() {
-            println!("{}", r.key());
-        }
-        r.last();
-        while r.prev() {
-            println!("{}", r.key());
-        }
+        r.iter(|_, iter| {
+            iter.begin();
+            while iter.forward() {
+                println!("{}", iter.key());
+            }
+            iter.end();
+            while iter.back() {
+                println!("{}", iter.key());
+            }
+        });
     }
 
     #[test]
     fn key_f64() {
-        println!("sizeof(Rax) {}", std::mem::size_of::<Rax<f64, MyMsg>>());
+        println!("sizeof(Rax) {}", std::mem::size_of::<RaxMap<f64, MyMsg>>());
 
-        let mut r = Rax::<f64, MyMsg>::new();
+        let mut r = RaxMap::<f64, MyMsg>::new();
 
         r.insert(
             100.01,
@@ -1162,21 +1476,26 @@ mod tests {
 
         r.show();
 
-        r.first();
-        while r.next() {
-            println!("{}", r.key());
-        }
-        r.last();
-        while r.prev() {
-            println!("{}", r.key());
-        }
+        r.iter(|_, iter| {
+//            for (k, v) in iter {
+//
+//            }
+            iter.begin();
+            while iter.forward() {
+                println!("{}", iter.key());
+            }
+            iter.end();
+            while iter.back() {
+                println!("{}", iter.key());
+            }
+        });
     }
 
     #[test]
     fn key_u64() {
-        println!("sizeof(Rax) {}", std::mem::size_of::<Rax<u64, MyMsg>>());
+        println!("sizeof(Rax) {}", std::mem::size_of::<RaxMap<u64, MyMsg>>());
 
-        let mut r = Rax::<u64, MyMsg>::new();
+        let mut r = RaxMap::<u64, MyMsg>::new();
 
         r.insert(
             100,
@@ -1197,19 +1516,89 @@ mod tests {
 
         r.show();
 
-        r.first();
-        while r.next() {
-            println!("{}", r.key());
-        }
-        r.last();
-        while r.prev() {
-            println!("{}", r.key());
-        }
+
+//        let result = r.iter_result(move |it| {
+//
+//            if !it.seek(GREATER_EQUAL, 800) {
+//                println!("Not Found");
+//                return Ok("");
+//            }
+//
+//            if it.eof() {
+//                println!("Not Found");
+//                return Ok("");
+//            }
+//
+//            while it.forward() {
+//                println!("Key Len = {}", it.key());
+//                println!("Data = {}", it.data().unwrap().0);
+//            }
+//
+//            Ok("")
+//        });
+
+//        r.seek(GREATER_EQUAL, 80, |_, iter| {
+//            for (key, value) in iter {
+//                println!("Key Len = {}", key);
+//                println!("Data = {}", value.unwrap().0);
+//            }
+//        });
+
+//        r.seek_result(GREATER_EQUAL, 80, |_, iter| {
+//            for (key, value) in iter {
+//                println!("Key Len = {}", key);
+//                println!("Data = {}", value.unwrap().0);
+//            }
+//            Ok(())
+//        });
+
+        r.seek_min(|_, it| {
+            for (key, value) in it.rev() {
+                println!("Key Len = {}", key);
+                unsafe { println!("Data = {}", value.unwrap().0); }
+            }
+        });
+
+//        r.iter(move |it| {
+//            if !it.seek(GREATER_EQUAL, 800) {
+//                println!("Not Found");
+//                return;
+//            }
+//
+//
+//
+//            while it.forward() {
+//                println!("Key Len = {}", it.key());
+//                println!("Data = {}", it.data().unwrap().0);
+//            }
+//        });
+
+//        let result = r.iter_apply(move |r, it| {
+//            if !it.seek(GREATER_EQUAL, 800) {
+//                println!("Out of Memory");
+//                return Ok("");
+//            }
+//
+//            r.insert(800, Box::new(MyMsg("moved")));
+//            it.seek(GREATER_EQUAL, 800);
+//
+//            if it.eof() {
+//                println!("Not Found");
+//                return Ok("");
+//            }
+//
+//            while it.back() {
+//                println!("Key Len = {}", it.key());
+//                println!("Data = {}", it.data().unwrap().0);
+//            }
+//
+//            Ok("")
+//        });
     }
 
     #[test]
     fn test_keyed() {
-        let mut r = Rax::<sds::SDS, MyMsg>::new();
+        let mut r = RaxMap::<sds::SDS, MyMsg>::new();
 
         r.insert(
             sds::SDS::new("hello"),
@@ -1253,15 +1642,19 @@ mod tests {
             Box::new(MyMsg("world x13")),
         ).expect("whoops!");
 
-        r.show();
+//        r.show();
 
-        r.first();
-        while r.next() {
-            println!("{}", r.key());
-        }
-        r.last();
-        while r.prev() {
-            println!("{}", r.key());
-        }
+        r.iter(move |_, iter| {
+            iter.begin();
+            while iter.forward() {
+                println!("{}", iter.key());
+            }
+            iter.end();
+            while iter.back() {
+                println!("{}", iter.key());
+            }
+        });
+
+        r.show();
     }
 }

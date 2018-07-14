@@ -94,7 +94,7 @@ impl SDS {
 
     #[inline]
     pub fn len(&self) -> usize {
-        len(self.0)
+        get_len(self.0)
     }
 
     #[inline]
@@ -356,7 +356,7 @@ pub fn cmp(s1: Sds, s2: Sds) -> libc::c_int {
 }
 
 #[inline]
-pub fn len(s: Sds) -> libc::size_t {
+pub fn get_len(s: Sds) -> libc::size_t {
     unsafe { sds_getlen(s) }
 }
 

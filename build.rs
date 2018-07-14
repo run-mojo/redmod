@@ -24,7 +24,9 @@ fn main() {
         .file("c/rax.c")
         .file("c/rax_ext.c")
         .file("c/stream.c")
-        .file("c/stream_ext.c")
+//        .file("c/stream_ext.c")
+        .file("c/xxhash.c")
+        .file("c/lz4.c")
 
         .file("src/redismodule.c")
         .include("c/")

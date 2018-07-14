@@ -3,7 +3,8 @@
 //
 
 #include "endianconv.h"
-#include "stream.h"
+//#include "stream.h"
+#include "stream_ext.h"
 
 #define STREAM_BYTES_PER_LISTPACK 2048
 
@@ -14,16 +15,16 @@
 #define STREAM_ITEM_FLAG_DELETED (1<<0)     /* Entry is delted. Skip it. */
 #define STREAM_ITEM_FLAG_SAMEFIELDS (1<<1)  /* Same fields as master entry. */
 
-int64_t lpGetInteger(unsigned char *ele);
-unsigned char *lpAppendInteger(unsigned char *lp, int64_t value);
-unsigned char *lpReplaceInteger(unsigned char *lp, unsigned char **pos, int64_t value);
-
-void streamEncodeID(void *buf, streamID *id);
-void streamDecodeID(void *buf, streamID *id);
-int streamCompareID(streamID *a, streamID *b);
-
-int streamAppendItemSDSMap(stream *s, void **argv, int64_t numfields, streamID *added_id, streamID *use_id);
-void streamNextID(streamID *last_id, streamID *new_id);
+//int64_t lpGetInteger(unsigned char *ele);
+//unsigned char *lpAppendInteger(unsigned char *lp, int64_t value);
+//unsigned char *lpReplaceInteger(unsigned char *lp, unsigned char **pos, int64_t value);
+//
+//void streamEncodeID(void *buf, streamID *id);
+//void streamDecodeID(void *buf, streamID *id);
+//int streamCompareID(streamID *a, streamID *b);
+//
+//int streamAppendItemSDSMap(stream *s, void **argv, int64_t numfields, streamID *added_id, streamID *use_id);
+//void streamNextID(streamID *last_id, streamID *new_id);
 
 /*
  * 

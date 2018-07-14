@@ -27,6 +27,7 @@ raxIterator *raxIteratorNew(rax *rt) {
 }
 
 void raxIteratorFree(raxIterator *it) {
+    //
     rax_free(it);
 }
 

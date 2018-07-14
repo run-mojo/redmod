@@ -58,7 +58,7 @@ pub struct JobsChunk {
     pub state: ChunkState,
 
     ///
-    pub list: Box<Rax<StreamID, Job>>,
+    pub list: Box<RaxMap<StreamID, Job>>,
 }
 
 pub enum Task {
@@ -80,9 +80,9 @@ pub struct JobStream {
     /// Chunk
     tail: Box<JobsChunk>,
     /// Radix tree of all chunks.
-    chunks: Box<Rax<StreamID, JobsChunk>>,
+    chunks: Box<RaxMap<StreamID, JobsChunk>>,
     /// De-duplication RAX
-    dup: Option<Box<Rax<SDS, Job>>>,
+    dup: Option<Box<RaxMap<SDS, Job>>>,
     /// Current configuration to control the behavior and memory consumption.
     config: Config,
     /// Dequeue of tasks.

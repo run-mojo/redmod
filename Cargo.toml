@@ -11,6 +11,7 @@ bench = false
 
 [dependencies]
 libc = "0.2"
+futures = "0.1.17"
 #jemallocator = "0.1"
 time = "0.1"
 bitflags = "1.0"

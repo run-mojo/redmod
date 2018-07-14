@@ -129,11 +129,11 @@ pub struct listpack;
 #[allow(non_camel_case_types)]
 #[link(name = "redismodule", kind = "static")]
 extern "C" {
-    fn lpNew() -> *mut listpack;
+    pub fn lpNew() -> *mut listpack;
 
-    fn lpFree(lp: *mut listpack);
+    pub fn lpFree(lp: *mut listpack);
 
-    fn lpInsert(
+    pub fn lpInsert(
         lp: *mut listpack,
         ele: *const u8,
         size: libc::uint32_t,
@@ -142,60 +142,60 @@ extern "C" {
         newp: *mut *mut u8,
     ) -> *mut listpack;
 
-    fn lpAppend(
+    pub fn lpAppend(
         lp: *mut listpack,
         ele: *const u8,
         size: libc::uint32_t) -> *mut listpack;
 
-    fn lpDelete(
+    pub fn lpDelete(
         lp: *mut listpack,
         p: *mut u8,
         newp: *mut *mut u8,
     ) -> *mut listpack;
 
-    fn lpLength(
+    pub fn lpLength(
         lp: *mut listpack
     ) -> libc::uint32_t;
 
-    fn lpGet(
+    pub fn lpGet(
         p: *mut u8,
         count: *mut libc::int64_t,
         intbuf: *mut u8,
     ) -> *mut u8;
 
-    fn lpGetInteger(
+    pub fn lpGetInteger(
         ele: *mut u8
     ) -> libc::int64_t;
 
-    fn lpFirst(lp: *mut listpack) -> *mut u8;
+    pub fn lpFirst(lp: *mut listpack) -> *mut u8;
 
-    fn lpLast(lp: *mut listpack) -> *mut u8;
+    pub fn lpLast(lp: *mut listpack) -> *mut u8;
 
-    fn lpNext(
+    pub fn lpNext(
         lp: *mut listpack,
         p: *mut u8,
     ) -> *mut u8;
 
-    fn lpPrev(
+    pub fn lpPrev(
         lp: *mut listpack,
         p: *mut u8,
     ) -> *mut u8;
 
-    fn lpBytes(
+    pub fn lpBytes(
         lp: *mut listpack
     ) -> libc::uint32_t;
 
-    fn lpSeek(
+    pub fn lpSeek(
         lp: *mut listpack,
         index: libc::c_long,
     ) -> *mut u8;
 
-    fn lpAppendInteger(
+    pub fn lpAppendInteger(
         lp: *mut listpack,
         value: libc::int64_t,
     ) -> *mut listpack;
 
-    fn lpReplaceInteger(
+    pub fn lpReplaceInteger(
         lp: *mut listpack,
         pos: *mut *mut u8,
         value: libc::int64_t,
